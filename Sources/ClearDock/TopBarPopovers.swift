@@ -11,6 +11,7 @@ final class BarPopover {
     private var hideWork: DispatchWorkItem?
     /// What's showing, such as "song" or "desktop-…".
     private(set) var showing: String?
+    private var inBarSpace = false
 
     init() {
         panel.onEnter = { [weak self] in self?.hideWork?.cancel() }
@@ -56,6 +57,10 @@ final class BarPopover {
         if showing == nil {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
+            if !inBarSpace {
+                BarSpace.add(panel)
+                inBarSpace = true
+            }
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.15
                 panel.animator().alphaValue = 1

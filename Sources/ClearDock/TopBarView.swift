@@ -243,7 +243,7 @@ private struct SongPill: View {
         let look = model.songLook(barLook)
         Pill(look: look, action: model.playPause) {
             if track.isPlaying {
-                SoundBars(color: Color(nsColor: look.accent), height: look.size.fontSize)
+                SoundBars(color: look.accent, height: look.size.fontSize)
             } else {
                 BarSymbol(name: "pause.fill", look: look)
             }
@@ -276,23 +276,60 @@ private struct SongPill: View {
     }
 }
 
-/// Four little bars that bounce while the song plays, redrawn about a dozen times a second.
-private struct SoundBars: View {
-    let color: Color
+/// Four little bars that bounce while the song plays. macOS animates them by itself, so the bar
+/// isn't redrawn while they move.
+private struct SoundBars: NSViewRepresentable {
+    let color: NSColor
     let height: CGFloat
-    private static let speeds = [2.6, 3.7, 3.1, 4.2]
-    private static let phases = [0.0, 1.3, 2.1, 0.7]
 
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 12)) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 1.5) {
-                ForEach(0..<4, id: \.self) { bar in
-                    let level = 0.3 + 0.7 * abs(sin(time * Self.speeds[bar] + Self.phases[bar]))
-                    Capsule().fill(color).frame(width: 2.2, height: max(2, height * level))
-                }
+    private static let barWidth: CGFloat = 2.2
+    private static let gap: CGFloat = 1.5
+
+    func makeNSView(context: Context) -> BarsView { BarsView() }
+
+    func updateNSView(_ view: BarsView, context: Context) {
+        view.show(color: color, height: height)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: BarsView, context: Context) -> CGSize? {
+        CGSize(width: 4 * Self.barWidth + 3 * Self.gap, height: height)
+    }
+
+    final class BarsView: NSView {
+        private var shown: (color: NSColor, height: CGFloat)?
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is not used")
+        }
+
+        func show(color: NSColor, height: CGFloat) {
+            guard shown?.color != color || shown?.height != height, let layer else { return }
+            shown = (color, height)
+            layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+            let durations = [0.42, 0.31, 0.37, 0.27]
+            let offsets = [0.0, 0.17, 0.09, 0.23]
+            for bar in 0..<4 {
+                let piece = CALayer()
+                piece.backgroundColor = color.cgColor
+                piece.cornerRadius = SoundBars.barWidth / 2
+                piece.bounds = CGRect(x: 0, y: 0, width: SoundBars.barWidth, height: height)
+                piece.position = CGPoint(x: CGFloat(bar) * (SoundBars.barWidth + SoundBars.gap) + SoundBars.barWidth / 2, y: height / 2)
+                let bounce = CABasicAnimation(keyPath: "transform.scale.y")
+                bounce.fromValue = 0.3
+                bounce.toValue = 1
+                bounce.duration = durations[bar]
+                bounce.timeOffset = offsets[bar]
+                bounce.autoreverses = true
+                bounce.repeatCount = .infinity
+                bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                piece.add(bounce, forKey: "bounce")
+                layer.addSublayer(piece)
             }
-            .frame(height: height)
         }
     }
 }

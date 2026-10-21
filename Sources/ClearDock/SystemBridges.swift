@@ -181,6 +181,45 @@ enum Games {
     }
 }
 
+/// A layer of the screen of Clear Dock's own, shown on every desktop, for the top bar's windows.
+/// Windows in it stay still while you switch desktops, instead of sliding along with them (which
+/// every window on all desktops otherwise does). Window levels still decide what's in front, so the
+/// bar stays above the macOS menu bar and below notch apps' islands. Uses the window server's
+/// private calls, as notch apps do.
+@MainActor
+enum BarSpace {
+    private typealias Connection = @convention(c) () -> Int32
+    private typealias Create = @convention(c) (Int32, Int32, CFDictionary?) -> UInt64
+    private typealias SetLevel = @convention(c) (Int32, UInt64, Int32) -> Int32
+    private typealias Show = @convention(c) (Int32, CFArray) -> Int32
+    private typealias AddWindows = @convention(c) (Int32, CFArray, CFArray) -> Void
+
+    private static let anywhere = UnsafeMutableRawPointer(bitPattern: -2)
+    private static func symbol<T>(_ name: String, _ type: T.Type) -> T? {
+        dlsym(anywhere, name).map { unsafeBitCast($0, to: type) }
+    }
+
+    /// Made the first time it's needed; it goes away when Clear Dock quits.
+    private static let space: (connection: Int32, id: UInt64)? = {
+        guard let connection = symbol("CGSMainConnectionID", Connection.self)?(),
+              let create = symbol("CGSSpaceCreate", Create.self),
+              let setLevel = symbol("CGSSpaceSetAbsoluteLevel", SetLevel.self),
+              let show = symbol("CGSShowSpaces", Show.self) else { return nil }
+        let id = create(connection, 1, nil)
+        guard id != 0 else { return nil }
+        _ = setLevel(connection, id, 0)
+        _ = show(connection, [NSNumber(value: id)] as CFArray)
+        return (connection, id)
+    }()
+
+    /// Puts a window in the layer. It needs to have been shown once first.
+    static func add(_ window: NSWindow) {
+        guard window.windowNumber > 0, let space,
+              let add = symbol("CGSAddWindowsToSpaces", AddWindows.self) else { return }
+        add(space.connection, [NSNumber(value: window.windowNumber)] as CFArray, [NSNumber(value: space.id)] as CFArray)
+    }
+}
+
 /// The system's private channel to the Dock, used here only to open App Exposé.
 enum CoreDock {
     private typealias SendNotification = @convention(c) (CFString, Int32) -> Void

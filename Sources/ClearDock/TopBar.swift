@@ -145,6 +145,7 @@ final class BarPanel: OverlayPanel {
     override init() {
         super.init()
         level = .statusBar
+        // On every desktop. It's also put in `BarSpace` so it stays still while you switch desktops.
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         ignoresMouseEvents = false
     }
@@ -200,6 +201,13 @@ final class TopBarController {
     private var backdropsTaken = Date.distantPast
     private var backdropTask: Task<Void, Never>?
     private var backdropsAtTop = false
+    /// Screens where Mission Control or App Exposé is open; the bar is hidden there meanwhile.
+    private var exposeScreens = Set<CGDirectDisplayID>()
+    private var exposeTimer: Timer?
+    /// Screens showing a full-screen app; the bar steps aside there, as the menu bar does.
+    private var fullScreenScreens = Set<CGDirectDisplayID>()
+    /// Bars already put in `BarSpace`.
+    private var inBarSpace = Set<CGDirectDisplayID>()
     private var pendingLayout: DispatchWorkItem?
     /// Screens where a game or another full-screen window is in front; the bar steps aside there.
     private var coveredScreens = Set<CGDirectDisplayID>()
@@ -312,6 +320,7 @@ final class TopBarController {
         observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {
             $0.refreshDesktops()
             $0.refreshWallpaperColors()
+            $0.checkFullScreen()
             $0.scheduleLayout(after: 0.4)
             // Each desktop can have its own wallpaper; take the strip again once the switch has settled.
             $0.refreshBackdrops(after: 0.8)
@@ -352,6 +361,8 @@ final class TopBarController {
         refreshFrontApp()
         refreshDesktops()
         checkCovered()
+        checkFullScreen()
+        startExposeWatch()
         refreshBackdrops(after: 1)
     }
 
@@ -370,6 +381,11 @@ final class TopBarController {
         revealTimer?.invalidate()
         revealTimer = nil
         endHold()
+        exposeTimer?.invalidate()
+        exposeTimer = nil
+        exposeScreens.removeAll()
+        fullScreenScreens.removeAll()
+        inBarSpace.removeAll()
         backdropTask?.cancel()
         model.backdrops = [:]
         pendingLayout?.cancel()
@@ -425,9 +441,10 @@ final class TopBarController {
             let panel = entry.panel
             let wasAway = isNew || !panel.isVisible || leaving.contains(id) || model.thinScreens.contains(String(id))
 
-            // Out of the way of a game, keeping no room for the bar on that screen.
-            if coveredScreens.contains(id) && gameMode != .stay {
-                if gameMode == .line {
+            // Out of the way of a game (or a full-screen app), keeping no room for the bar on that screen.
+            let fullScreen = fullScreenScreens.contains(id)
+            if fullScreen || (coveredScreens.contains(id) && gameMode != .stay) {
+                if gameMode == .line && !fullScreen {
                     // A thin line in the highlight colour along the very top.
                     thin.insert(String(id))
                     leaving.remove(id)
@@ -482,6 +499,12 @@ final class TopBarController {
             entry.panel.orderOut(nil)
             panels[id] = nil
         }
+        // Into Clear Dock's own layer once shown, so the bars stay still while switching desktops.
+        for (id, entry) in panels where !inBarSpace.contains(id) && entry.panel.windowNumber > 0 {
+            BarSpace.add(entry.panel)
+            inBarSpace.insert(id)
+        }
+        inBarSpace.formIntersection(kept)
         if model.layouts != layouts {
             // The bars moved or changed size, so the strips behind them need taking again.
             if model.layouts.mapValues(\.width) != layouts.mapValues(\.width) || replacesMenuBar != backdropsAtTop {
@@ -492,6 +515,65 @@ final class TopBarController {
         backdropsAtTop = replacesMenuBar
         if model.thinScreens != thin { model.thinScreens = thin }
         DockSpaceKeeper.shared.reserveTop(reserved)
+    }
+
+    /// Checks a few times a second whether Mission Control or App Exposé is open. macOS doesn't
+    /// announce either, but while one is open it draws a backdrop over each screen; looking for it
+    /// takes well under a millisecond.
+    private func startExposeWatch() {
+        exposeTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkExpose() }
+        }
+        timer.tolerance = 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        exposeTimer = timer
+    }
+
+    private func checkExpose() {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        var open = Set<CGDirectDisplayID>()
+        for info in windows where info[kCGWindowOwnerName as String] as? String == "WindowManager" && info[kCGWindowLayer as String] as? Int == 19 {
+            guard let bounds = info[kCGWindowBounds as String] as? NSDictionary, let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
+            for screen in NSScreen.screens where Self.topDown(screen.frame).insetBy(dx: 2, dy: 2).intersects(rect) && rect.width >= screen.frame.width - 2 {
+                if let id = screen.displayID { open.insert(id) }
+            }
+        }
+        guard open != exposeScreens else { return }
+        let opened = open.subtracting(exposeScreens), closed = exposeScreens.subtracting(open)
+        exposeScreens = open
+        if !opened.isEmpty { popover.hide() }
+        for id in opened { exposeChanged(on: id, open: true) }
+        for id in closed { exposeChanged(on: id, open: false) }
+    }
+
+    /// Mission Control or App Exposé opened or closed on a screen: hide that screen's bar while it's
+    /// open (its strip of desktops and buttons go where the bar is), and bring it back afterwards.
+    private func exposeChanged(on id: CGDirectDisplayID, open: Bool) {
+        guard running, let panel = panels[id]?.panel else { return }
+        if open {
+            panel.alphaValue = 0
+            panel.ignoresMouseEvents = true
+        } else if !coveredScreens.contains(id), !fullScreenScreens.contains(id), revealTimer == nil {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                panel.animator().alphaValue = 1
+            }
+            panel.ignoresMouseEvents = false
+        }
+    }
+
+    /// Notices a display switching to or from a full-screen app.
+    private func checkFullScreen() {
+        let displays = DesktopReader.fullScreenDisplays()
+        var screens = Set<CGDirectDisplayID>()
+        for screen in NSScreen.screens {
+            guard let id = screen.displayID else { continue }
+            if displays.contains("Main") || displays.contains(screen.displayUUID ?? "") { screens.insert(id) }
+        }
+        guard screens != fullScreenScreens else { return }
+        fullScreenScreens = screens
+        layout()
     }
 
     private static func animate(_ panel: NSPanel, to frame: NSRect, alpha: CGFloat, then done: (@MainActor () -> Void)? = nil) {

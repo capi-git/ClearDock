@@ -89,6 +89,16 @@ enum DesktopReader {
         return result
     }
 
+    /// Displays showing a full-screen app right now, by UUID (or "Main" when displays share desktops).
+    static func fullScreenDisplays() -> Set<String> {
+        var result = Set<String>()
+        for display in WindowSpaces.displaySpaces() {
+            guard let current = display["Current Space"] as? [String: Any], (current["type"] as? Int ?? 0) != 0 else { continue }
+            result.insert(display["Display Identifier"] as? String ?? "Main")
+        }
+        return result
+    }
+
     private static func id(_ space: [String: Any]?) -> UInt64? {
         guard let space else { return nil }
         return ((space["id64"] ?? space["ManagedSpaceID"]) as? NSNumber)?.uint64Value
