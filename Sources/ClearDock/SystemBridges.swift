@@ -135,6 +135,20 @@ enum AppWindowList {
         return unsafeBitCast(symbol, to: GetWindow.self)
     }()
 
+    /// The window number of an accessibility window.
+    static func windowID(of window: AXUIElement) -> CGWindowID? {
+        guard let getWindow else { return nil }
+        var id: CGWindowID = 0
+        return getWindow(window, &id) == .success ? id : nil
+    }
+
+    /// The level a window sits at: 0 for ordinary windows, higher for things like a game's
+    /// full-screen layer.
+    static func layer(of windowID: CGWindowID) -> Int? {
+        let info = CGWindowListCreateDescriptionFromArray([NSNumber(value: windowID)] as CFArray) as? [[String: Any]]
+        return info?.first?[kCGWindowLayer as String] as? Int
+    }
+
     static func windowIDs(of pid: pid_t) -> Set<CGWindowID> {
         guard AXIsProcessTrusted(), let getWindow else { return [] }
         let app = AXUIElementCreateApplication(pid)
@@ -148,6 +162,22 @@ enum AppWindowList {
             if getWindow(window, &id) == .success { ids.insert(id) }
         }
         return ids
+    }
+}
+
+/// Games, which Clear Dock leaves alone: it never moves their windows, and the top bar steps
+/// aside while one is in front. An app counts as a game when it says so in its own settings.
+@MainActor
+enum Games {
+    private static var known: [pid_t: Bool] = [:]
+
+    static func isGame(_ pid: pid_t) -> Bool {
+        if let answer = known[pid] { return answer }
+        let category = NSRunningApplication(processIdentifier: pid)?.bundleURL
+            .flatMap { Bundle(url: $0)?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String }
+        let answer = category?.contains("games") ?? false
+        known[pid] = answer
+        return answer
     }
 }
 

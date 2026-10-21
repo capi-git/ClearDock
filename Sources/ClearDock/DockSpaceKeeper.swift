@@ -199,6 +199,10 @@ final class DockSpaceKeeper {
         AXUIElementSetMessagingTimeout(window, 0.35)
         // Full-screen windows have their own desktop and can't be resized.
         if (attribute(window, "AXFullScreen") as? Bool) == true { return }
+        // Leave games alone, and anything that isn't an ordinary window (like a game's full-screen layer).
+        var pid: pid_t = 0
+        if AXUIElementGetPid(window, &pid) == .success, Games.isGame(pid) { return }
+        if let id = AppWindowList.windowID(of: window), let layer = AppWindowList.layer(of: id), layer != 0 { return }
         if (attribute(window, kAXMinimizedAttribute) as? Bool) == true { return }
         guard let origin = point(window, kAXPositionAttribute), let size = size(window, kAXSizeAttribute) else { return }
         let original = CGRect(origin: origin, size: size)

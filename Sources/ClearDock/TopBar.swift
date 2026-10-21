@@ -138,6 +138,8 @@ final class TopBarController {
     private var revealTimer: Timer?
     private var revealStarted = Date.distantPast
     private var pendingLayout: DispatchWorkItem?
+    /// Screens where a game or another full-screen window is in front; the bar steps aside there.
+    private var coveredScreens = Set<CGDirectDisplayID>()
 
     init() {
         nowPlaying.onChange = { [weak self] in
@@ -223,7 +225,13 @@ final class TopBarController {
 
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) { $0.refreshDesktops(); $0.refreshWallpaperColors(); $0.scheduleLayout(after: 0.4) }
-        observe(workspace, NSWorkspace.didActivateApplicationNotification) { $0.refreshFrontApp(); $0.refreshDesktops() }
+        observe(workspace, NSWorkspace.didActivateApplicationNotification) {
+            $0.refreshFrontApp()
+            $0.refreshDesktops()
+            $0.checkCovered()
+            // Games often go full screen a moment after they come forward.
+            $0.scheduleCoverCheck()
+        }
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification,
                      NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
             observe(workspace, name) { $0.refreshDesktops(); $0.model.pruneIcons() }
@@ -238,7 +246,10 @@ final class TopBarController {
         }
 
         let desktops = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshDesktops() }
+            MainActor.assumeIsolated {
+                self?.refreshDesktops()
+                self?.checkCovered()
+            }
         }
         desktops.tolerance = 2
         RunLoop.main.add(desktops, forMode: .common)
@@ -247,6 +258,7 @@ final class TopBarController {
         tick()
         refreshFrontApp()
         refreshDesktops()
+        checkCovered()
     }
 
     private func stop() {
@@ -308,6 +320,11 @@ final class TopBarController {
             let frame = barFrame(on: screen, replacesMenuBar: replacesMenuBar)
             let entry = panels[id] ?? makePanel(for: id)
             if entry.panel.frame != frame { entry.panel.setFrame(frame, display: true) }
+            // Out of the way of a game, and keep no room for the bar on that screen.
+            if coveredScreens.contains(id) {
+                entry.panel.orderOut(nil)
+                continue
+            }
             entry.panel.orderFrontRegardless()
 
             // Leave the middle clear for the notch, and for any island drawn over the bar.
@@ -433,6 +450,43 @@ final class TopBarController {
             let sharedBefore = model.desktops.keys.contains("Main")
             model.desktops = desktops
             if desktops.keys.contains("Main") != sharedBefore { layout() }
+        }
+    }
+
+    /// Notices when the app in front fills a screen with a game or another full-screen window,
+    /// so the bar steps aside there, and comes back once it doesn't.
+    private func checkCovered() {
+        var covered = Set<CGDirectDisplayID>()
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != getpid() {
+            let pid = front.processIdentifier
+            let game = Games.isGame(pid)
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            for info in windows where info[kCGWindowOwnerPID as String] as? pid_t == pid {
+                guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                      let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
+                let layer = info[kCGWindowLayer as String] as? Int ?? 0
+                for screen in NSScreen.screens {
+                    guard let id = screen.displayID else { continue }
+                    let area = Self.topDown(screen.frame)
+                    let overlap = rect.intersection(area)
+                    guard !overlap.isNull else { continue }
+                    let share = overlap.width * overlap.height / (area.width * area.height)
+                    // A game covering most of a screen, or a special window covering all of it.
+                    // An ordinary window made as big as the screen still gets room made for the bar.
+                    if (game && share > 0.8) || (layer > 0 && share > 0.97) { covered.insert(id) }
+                }
+            }
+        }
+        guard covered != coveredScreens else { return }
+        coveredScreens = covered
+        layout()
+    }
+
+    private func scheduleCoverCheck() {
+        for delay in [1.0, 3.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated { self?.checkCovered() }
+            }
         }
     }
 
