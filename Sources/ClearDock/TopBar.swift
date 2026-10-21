@@ -85,6 +85,9 @@ final class TopBarModel: ObservableObject {
     @Published var artColours: ArtColours?
     /// Screens whose bar is a thin line while a game is in front.
     @Published var thinScreens = Set<String>()
+    /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
+    /// macOS menu bar sliding down underneath doesn't show through.
+    @Published var backdropScreens = Set<String>()
 
     /// Things the views ask the controller to do.
     var toggleMute: () -> Void = {}
@@ -130,14 +133,14 @@ final class TopBarModel: ObservableObject {
     }
 }
 
-/// A see-through strip along the top of a screen: below the macOS menu bar (which covers it when
-/// it slides down) and below notch apps like Vorssaint, so their islands draw over it. It isn't
-/// shown over full-screen apps.
+/// A see-through strip along the top of a screen: above the macOS menu bar, so it stays in front
+/// when that slides down until you hold the pointer at the top, and below notch apps like
+/// Vorssaint, so their islands draw over it. It isn't shown over full-screen apps.
 @MainActor
 final class BarPanel: OverlayPanel {
     override init() {
         super.init()
-        level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue - 1)
+        level = .statusBar
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         ignoresMouseEvents = false
     }
@@ -185,6 +188,11 @@ final class TopBarController {
     private var desktopTimer: Timer?
     private var revealTimer: Timer?
     private var revealStarted = Date.distantPast
+    /// Watches the pointer while it's at the top of a screen, before the macOS menu bar shows.
+    private var holdTimer: Timer?
+    private var holdScreen: CGDirectDisplayID?
+    private var heldSince: Date?
+    private var leftTopSince: Date?
     private var pendingLayout: DispatchWorkItem?
     /// Screens where a game or another full-screen window is in front; the bar steps aside there.
     private var coveredScreens = Set<CGDirectDisplayID>()
@@ -347,6 +355,7 @@ final class TopBarController {
         desktopTimer = nil
         revealTimer?.invalidate()
         revealTimer = nil
+        endHold()
         pendingLayout?.cancel()
         popover.hide()
         model.thinScreens = []
@@ -476,7 +485,7 @@ final class TopBarController {
     private func makePanel(for id: CGDirectDisplayID) -> (panel: BarPanel, view: BarHostingView) {
         let panel = BarPanel()
         let view = BarHostingView(rootView: TopBarView(model: model, screenKey: String(id)))
-        view.onTopEdge = { [weak self] in self?.menuBarRevealing() }
+        view.onTopEdge = { [weak self] in self?.pointerAtTop(of: id) }
         panel.contentView = view
         panels[id] = (panel, view)
         return (panel, view)
@@ -517,12 +526,62 @@ final class TopBarController {
 
     // MARK: The macOS menu bar
 
-    /// The pointer reached the top of the screen, so the macOS menu bar is about to slide down
-    /// over the bar. Fade the bar out of its way, and back once the pointer leaves the menus.
-    private func menuBarRevealing() {
-        guard BarSettings.takesMenuBarsPlace, revealTimer == nil else { return }
+    /// The pointer reached the very top of a screen. macOS starts sliding its menu bar down there,
+    /// underneath the bar. The bar fills in so the menu bar doesn't show through, and only steps
+    /// aside once the pointer has been held at the top for a moment.
+    private func pointerAtTop(of id: CGDirectDisplayID) {
+        guard BarSettings.takesMenuBarsPlace, revealTimer == nil, !coveredScreens.contains(id) else { return }
+        if holdScreen != id { heldSince = Date() }
+        holdScreen = id
+        leftTopSince = nil
+        model.backdropScreens = [String(id)]
+        guard holdTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkHold() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        holdTimer = timer
+    }
+
+    private func checkHold() {
+        guard let id = holdScreen, let screen = NSScreen.screens.first(where: { $0.displayID == id }),
+              let bar = panels[id]?.panel else { return endHold() }
+        let mouse = NSEvent.mouseLocation
+        let onScreen = NSMouseInRect(mouse, screen.frame, false)
+        if onScreen && mouse.y >= screen.frame.maxY - 3 {
+            // Still at the very top: show the macOS menu bar once it's been held there long enough.
+            leftTopSince = nil
+            if heldSince == nil { heldSince = Date() }
+            if let since = heldSince, Date().timeIntervalSince(since) >= BarSettings.menuBarDelay {
+                endHold(keepBackdrop: true)
+                menuBarRevealing(on: id)
+            }
+            return
+        }
+        // Moved down off the edge: start counting again next time it touches the top.
+        heldSince = nil
+        // Keep the fill while the pointer is on the bar (the menu bar may still be down underneath),
+        // and a moment after it leaves, while the menu bar slides away.
+        if onScreen && mouse.y >= bar.frame.minY - 4 { leftTopSince = nil; return }
+        if leftTopSince == nil { leftTopSince = Date() }
+        if let since = leftTopSince, Date().timeIntervalSince(since) > 0.35 { endHold() }
+    }
+
+    private func endHold(keepBackdrop: Bool = false) {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        holdScreen = nil
+        heldSince = nil
+        leftTopSince = nil
+        if !keepBackdrop { model.backdropScreens = [] }
+    }
+
+    /// The pointer was held at the top, so step out of the way of the macOS menu bar, and come back
+    /// once the pointer leaves the menus.
+    private func menuBarRevealing(on id: CGDirectDisplayID) {
+        guard revealTimer == nil else { return }
         revealStarted = Date()
-        setBarsVisible(false)
+        setBarsVisible(false, only: id)
         let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkMenuBarGone() }
         }
@@ -540,6 +599,7 @@ final class TopBarController {
         if Date().timeIntervalSince(revealStarted) < 8, Self.menuBarShowing() { return }
         revealTimer?.invalidate()
         revealTimer = nil
+        model.backdropScreens = []
         setBarsVisible(true)
     }
 
@@ -556,9 +616,9 @@ final class TopBarController {
         }
     }
 
-    private func setBarsVisible(_ visible: Bool) {
+    private func setBarsVisible(_ visible: Bool, only id: CGDirectDisplayID? = nil) {
         // Bars stepping aside for a game are left as they are.
-        let bars = panels.filter { !coveredScreens.contains($0.key) }.map(\.value.panel)
+        let bars = panels.filter { !coveredScreens.contains($0.key) && (id == nil || $0.key == id) }.map(\.value.panel)
         if !visible { popover.hide() }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = visible ? 0.2 : 0.1

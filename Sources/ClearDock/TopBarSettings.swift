@@ -253,6 +253,13 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "bar.miniPlayer") }
     }
 
+    /// How long to hold the pointer at the very top of the screen before the macOS menu bar
+    /// shows, in seconds, while the top bar takes its place.
+    static var menuBarDelay: Double {
+        get { defaults.object(forKey: "bar.menuBarDelay") == nil ? 1 : min(3, max(0.2, defaults.double(forKey: "bar.menuBarDelay"))) }
+        set { defaults.set(newValue, forKey: "bar.menuBarDelay") }
+    }
+
     static var gameMode: GameMode {
         get { defaults.string(forKey: "bar.gameMode").flatMap(GameMode.init(rawValue:)) ?? .slide }
         set { defaults.set(newValue.rawValue, forKey: "bar.gameMode") }

@@ -166,6 +166,7 @@ final class SettingsStore: ObservableObject {
     @Published var albumColours = true { didSet { edit(keepsTheme: true) { BarSettings.albumColours = albumColours } } }
     @Published var miniPlayer = true { didSet { edit(keepsTheme: true) { BarSettings.miniPlayer = miniPlayer } } }
     @Published var gameMode = GameMode.slide { didSet { edit(keepsTheme: true) { BarSettings.gameMode = gameMode } } }
+    @Published var menuBarDelay = 1.0 { didSet { edit(keepsTheme: true) { BarSettings.menuBarDelay = menuBarDelay } } }
 
     /// Your desktops, for naming and colouring them.
     struct DesktopRow: Identifiable {
@@ -308,6 +309,7 @@ final class SettingsStore: ObservableObject {
         albumColours = BarSettings.albumColours
         miniPlayer = BarSettings.miniPlayer
         gameMode = BarSettings.gameMode
+        menuBarDelay = BarSettings.menuBarDelay
         loadDesktops()
         loadCustomIcons()
         refreshStatus()
@@ -589,13 +591,21 @@ private struct TopBarTab: View {
                     .disabled(!store.barEnabled)
                 Toggle("Replace the macOS menu bar", isOn: $store.barReplacesMenuBar)
                     .disabled(!store.barEnabled)
+                if store.barReplacesMenuBar {
+                    LabeledContent("Hold at the top to show macOS menus") {
+                        HStack {
+                            Slider(value: $store.menuBarDelay, in: 0.2...3, step: 0.1).frame(width: 180)
+                            Text(String(format: "%.1f s", store.menuBarDelay)).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 if store.menuBarRefused {
                     LabeledContent("macOS didn't allow it") {
                         Button("Open Automation Settings…") { SystemMenuBar.openAutomationSettings() }
                     }
                 }
             } footer: {
-                Text("Replacing the menu bar sets it to hide itself; push the pointer to the very top of the screen to get the macOS menus. It comes back when the top bar is off or Clear Dock quits. The first time, macOS asks you to let Clear Dock control System Events, which is how it changes that setting. Otherwise the top bar sits under the menu bar. It leaves room for the camera notch and for notch apps like Vorssaint.")
+                Text("Replacing the menu bar sets it to hide itself; hold the pointer at the very top of the screen to get the macOS menus. It comes back when the top bar is off or Clear Dock quits. The first time, macOS asks you to let Clear Dock control System Events, which is how it changes that setting. Otherwise the top bar sits under the menu bar. It leaves room for the camera notch and for notch apps like Vorssaint.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

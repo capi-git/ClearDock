@@ -24,6 +24,15 @@ struct TopBarView: View {
                     row(.right, layout).frame(width: side, alignment: .trailing)
                 }
                 .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background {
+                    // Filled in while the pointer is at the top, hiding the macOS menu bar underneath.
+                    if model.backdropScreens.contains(screenKey) {
+                        Rectangle().fill(Color(nsColor: look.fill))
+                            .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1) }
+                            .transition(.opacity)
+                    }
+                }
                 .contentShape(Rectangle())
                 .contextMenu { BarSettingsButton() }
             }
@@ -31,6 +40,7 @@ struct TopBarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\.barLook, look)
         .animation(.easeInOut(duration: 0.45), value: look)
+        .animation(.easeOut(duration: 0.12), value: model.backdropScreens)
     }
 
     private func row(_ side: BarSide, _ layout: BarLayout) -> some View {
