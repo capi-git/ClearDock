@@ -172,6 +172,13 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "bar.desktopNames") }
     }
 
+    /// The top bar takes the macOS menu bar's place: Clear Dock sets the menu bar to hide itself
+    /// while the bar is on. Off until you switch it on.
+    static var replaceMenuBar: Bool {
+        get { defaults.bool(forKey: "bar.replaceMenuBar") }
+        set { defaults.set(newValue, forKey: "bar.replaceMenuBar") }
+    }
+
     /// Whether the bar needs colours taken from the wallpaper.
     static var usesWallpaper: Bool { enabled && (style == .wallpaper || accentIndex >= 0) }
 
@@ -197,4 +204,59 @@ enum BarSettings {
 
     /// Posted when a bar setting changes outside the settings window (for example from a menu).
     static let didChange = Notification.Name("ClearDockBarSettingsChanged")
+}
+
+/// Hides the macOS menu bar while the top bar takes its place, the supported way: by asking
+/// System Events to turn on "Automatically hide and show the menu bar". The setting from before
+/// is saved first, so `restore()` can put it back exactly. macOS asks you once to let Clear Dock
+/// control System Events.
+@MainActor
+enum SystemMenuBar {
+    private static let savedKey = "savedMenuBarAutohide"
+
+    /// Whether Clear Dock has hidden the menu bar (and has the earlier setting saved).
+    static var isHiddenByClearDock: Bool { UserDefaults.standard.object(forKey: savedKey) != nil }
+
+    /// Returns false if macOS didn't allow it.
+    @discardableResult
+    static func hide() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: savedKey) == nil {
+            guard let current = run("get autohide menu bar of dock preferences") else { return false }
+            defaults.set(current.booleanValue, forKey: savedKey)
+        }
+        guard run("set autohide menu bar of dock preferences to true") != nil else {
+            defaults.removeObject(forKey: savedKey)
+            return false
+        }
+        return true
+    }
+
+    static func restore() {
+        let defaults = UserDefaults.standard
+        guard let saved = defaults.object(forKey: savedKey) as? Bool else { return }
+        if run("set autohide menu bar of dock preferences to \(saved)") != nil {
+            defaults.removeObject(forKey: savedKey)
+        }
+    }
+
+    /// Whether macOS has refused Clear Dock control of System Events.
+    private(set) static var refused = false
+
+    private static func run(_ command: String) -> NSAppleEventDescriptor? {
+        var error: NSDictionary?
+        let result = NSAppleScript(source: "tell application \"System Events\" to \(command)")?.executeAndReturnError(&error)
+        if let error {
+            // -1743: not allowed to control System Events (Privacy & Security > Automation).
+            refused = (error[NSAppleScript.errorNumber] as? Int) == -1743
+            NSLog("Clear Dock: couldn't change the menu bar: \(error)")
+            return nil
+        }
+        refused = false
+        return result
+    }
+
+    static func openAutomationSettings() {
+        SystemSettings.open("com.apple.preference.security?Privacy_Automation")
+    }
 }

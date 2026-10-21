@@ -95,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Across a restart, keep the macOS Dock hidden only if Clear Dock will reopen at login.
         if poweringOff && LoginItem.isEnabled { return }
         SystemDock.restore()
+        SystemMenuBar.restore()
     }
 
     // MARK: Menu bar item

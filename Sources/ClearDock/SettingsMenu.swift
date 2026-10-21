@@ -81,6 +81,12 @@ enum SettingsMenu {
             BarSettings.enabled.toggle()
             NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
         })
+        let replaceItem = ActionMenuItem("Top bar replaces the macOS menu bar", checked: BarSettings.replaceMenuBar) {
+            BarSettings.replaceMenuBar.toggle()
+            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+        }
+        replaceItem.isEnabled = BarSettings.enabled
+        menu.addItem(replaceItem)
         menu.addItem(ActionMenuItem("Hide the macOS Dock", checked: Settings.hideSystemDock) {
             Settings.hideSystemDock.toggle()
             if Settings.hideSystemDock { SystemDock.hide() } else { SystemDock.restore() }

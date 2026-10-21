@@ -157,15 +157,15 @@ final class TopBarController {
             self.volume.set(level + change)
         }
         model.rename = { [weak self] desktop in self?.rename(desktop) }
-        model.forget = { [weak self] desktop in
+        model.forget = { desktop in
             var names = BarSettings.desktopNames
             names[desktop.key] = nil
             BarSettings.desktopNames = names
-            self?.model.desktopNames = names
+            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
         }
-        model.hide = { [weak self] kind in
+        model.hide = { kind in
             BarSettings.items = BarSettings.items.map { $0.kind == kind ? BarItem(kind: $0.kind, side: $0.side, isOn: false) : $0 }
-            self?.settingsChanged()
+            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
         }
 
         NotificationCenter.default.addObserver(forName: BarSettings.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -175,6 +175,7 @@ final class TopBarController {
     }
 
     func settingsChanged() {
+        applyMenuBarSetting()
         guard BarSettings.enabled else { return stop() }
         start()
         model.items = BarSettings.items
@@ -182,6 +183,23 @@ final class TopBarController {
         applyLook()
         refreshWallpaperColors()
         layout()
+    }
+
+    /// Hides the macOS menu bar while the bar replaces it, and puts it back otherwise.
+    private func applyMenuBarSetting() {
+        let wanted = BarSettings.enabled && BarSettings.replaceMenuBar
+        if wanted {
+            guard SystemMenuBar.hide() else { return }
+        } else {
+            guard SystemMenuBar.isHiddenByClearDock else { return }
+            SystemMenuBar.restore()
+        }
+        // The menu bar takes a moment to slide away or come back; move the bar once it has.
+        for delay in [0.4, 1.2] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated { self?.layout() }
+            }
+        }
     }
 
     // MARK: Starting and stopping
@@ -477,7 +495,7 @@ final class TopBarController {
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         names[desktop.key] = name.isEmpty ? nil : name
         BarSettings.desktopNames = names
-        model.desktopNames = names
+        NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
     }
 }
 

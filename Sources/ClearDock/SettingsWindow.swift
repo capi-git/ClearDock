@@ -137,6 +137,16 @@ final class SettingsStore: ObservableObject {
     // Top bar
     @Published var barEnabled = false { didSet { edit(keepsTheme: true) { BarSettings.enabled = barEnabled } } }
     @Published var barAllScreens = true { didSet { edit(keepsTheme: true) { BarSettings.allScreens = barAllScreens } } }
+    @Published var barReplacesMenuBar = false {
+        didSet {
+            edit(keepsTheme: true) { BarSettings.replaceMenuBar = barReplacesMenuBar }
+            // Show whether macOS allowed it once the change has been made.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                MainActor.assumeIsolated { self?.refreshStatus() }
+            }
+        }
+    }
+    @Published var menuBarRefused = false
     @Published var barItems: [BarItem] = [] { didSet { edit(keepsTheme: true) { BarSettings.items = barItems } } }
     @Published var barStyle = BarStyle.wallpaper { didSet { edit(keepsTheme: true) { BarSettings.style = barStyle } } }
     @Published var barColor = Color.black { didSet { edit(keepsTheme: true) { BarSettings.color = NSColor(barColor) } } }
@@ -240,6 +250,7 @@ final class SettingsStore: ObservableObject {
         openAtLogin = LoginItem.isEnabled
         barEnabled = BarSettings.enabled
         barAllScreens = BarSettings.allScreens
+        barReplacesMenuBar = BarSettings.replaceMenuBar
         barItems = BarSettings.items
         barStyle = BarSettings.style
         barColor = Color(nsColor: BarSettings.color)
@@ -264,6 +275,7 @@ final class SettingsStore: ObservableObject {
         wallpaperAccent = Color(nsColor: WallpaperPalette.shared.accent)
         wallpaperAccents = WallpaperPalette.shared.accents.map { Color(nsColor: $0) }
         menuBarHidden = BarSettings.macMenuBarHidden
+        menuBarRefused = SystemMenuBar.refused
         desktopShortcutsOn = DesktopSwitcher.shortcutsOn
     }
 
@@ -364,6 +376,10 @@ struct SettingsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: WallpaperPalette.didChange)) { _ in
             store.refreshStatus()
+        }
+        // The top bar's own menus change its settings too; show those changes here.
+        .onReceive(NotificationCenter.default.publisher(for: BarSettings.didChange)) { _ in
+            store.reload()
         }
     }
 }
@@ -524,15 +540,15 @@ private struct TopBarTab: View {
                 Toggle("Show the top bar", isOn: $store.barEnabled)
                 Toggle("On every screen", isOn: $store.barAllScreens)
                     .disabled(!store.barEnabled)
-                LabeledContent("macOS menu bar") {
-                    HStack {
-                        Text(store.menuBarHidden ? "Hidden: the top bar takes its place" : "Showing: the top bar sits under it")
-                            .foregroundStyle(.secondary)
-                        Button("Change…") { BarSettings.openMenuBarSettings() }
+                Toggle("Replace the macOS menu bar", isOn: $store.barReplacesMenuBar)
+                    .disabled(!store.barEnabled)
+                if store.menuBarRefused {
+                    LabeledContent("macOS didn't allow it") {
+                        Button("Open Automation Settings…") { SystemMenuBar.openAutomationSettings() }
                     }
                 }
             } footer: {
-                Text("For the top bar to replace the macOS menu bar, set \"Automatically hide and show the menu bar\" to Always. Push the pointer to the very top of the screen to get the macOS menus back. The bar leaves room for the camera notch and for notch apps like Vorssaint.")
+                Text("Replacing the menu bar sets it to hide itself; push the pointer to the very top of the screen to get the macOS menus. It comes back when the top bar is off or Clear Dock quits. The first time, macOS asks you to let Clear Dock control System Events, which is how it changes that setting. Otherwise the top bar sits under the menu bar. It leaves room for the camera notch and for notch apps like Vorssaint.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

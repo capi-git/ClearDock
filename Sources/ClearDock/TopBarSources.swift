@@ -117,8 +117,16 @@ enum DesktopSwitcher {
             WindowFocus.raise(window, of: app)
             return
         }
-        explainShortcuts()
+        if explained {
+            NSSound.beep()
+        } else {
+            explained = true
+            explainShortcuts()
+        }
     }
+
+    /// The explanation shows once each time Clear Dock opens; after that a click just beeps.
+    private static var explained = false
 
     static func openShortcutSettings() {
         for page in ["x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Shortcuts",
@@ -195,6 +203,41 @@ final class NowPlaying {
             }
         }
         tokens.append((workspace, quit))
+        askPlayers()
+    }
+
+    /// Spotify and Music only announce changes, so when the bar starts, ask whichever is open
+    /// what it's playing now. macOS asks you once to let Clear Dock do this.
+    private func askPlayers() {
+        for (_, player) in Self.players where !NSRunningApplication.runningApplications(withBundleIdentifier: player).isEmpty {
+            let script = """
+                tell application id "\(player)"
+                    set playerState to player state as text
+                    if playerState is "stopped" then return playerState
+                    return playerState & linefeed & (name of current track) & linefeed & (artist of current track)
+                end tell
+                """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            // Run separately, so the bar keeps working while macOS asks for permission.
+            process.terminationHandler = { [weak self] _ in
+                let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                let lines = text.trimmingCharacters(in: .newlines).components(separatedBy: "\n")
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        // Don't override a change the player announced in the meantime.
+                        guard let self, self.track == nil, lines.count >= 2 else { return }
+                        let state = lines[0] == "playing" ? "Playing" : lines[0] == "paused" ? "Paused" : "Stopped"
+                        self.update(state: state, title: lines[1], artist: lines.count > 2 ? lines[2] : "", player: player)
+                    }
+                }
+            }
+            try? process.run()
+        }
     }
 
     func stop() {

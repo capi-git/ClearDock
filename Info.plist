@@ -25,7 +25,7 @@
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Clear Dock reads the notification counts shown on app icons in the macOS Dock.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Clear Dock asks Finder to empty the Trash when you choose Empty Trash.</string>
+	<string>Clear Dock asks Finder to empty the Trash when you choose Empty Trash, asks Spotify or Music what's playing for the top bar, and asks System Events to hide the macOS menu bar while the top bar takes its place.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
