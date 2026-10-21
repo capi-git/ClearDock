@@ -1,4 +1,5 @@
 import AppKit
+import ScreenCaptureKit
 import SwiftUI
 
 /// How the top bar looks right now, worked out from its settings and the wallpaper.
@@ -88,6 +89,9 @@ final class TopBarModel: ObservableObject {
     /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
     /// macOS menu bar sliding down underneath doesn't show through.
     @Published var backdropScreens = Set<String>()
+    /// What's behind each screen's bar (its strip of wallpaper), used as that fill so the bar
+    /// looks just as it always does.
+    @Published var backdrops: [String: CGImage] = [:]
 
     /// Things the views ask the controller to do.
     var toggleMute: () -> Void = {}
@@ -193,6 +197,9 @@ final class TopBarController {
     private var holdScreen: CGDirectDisplayID?
     private var heldSince: Date?
     private var leftTopSince: Date?
+    private var backdropsTaken = Date.distantPast
+    private var backdropTask: Task<Void, Never>?
+    private var backdropsAtTop = false
     private var pendingLayout: DispatchWorkItem?
     /// Screens where a game or another full-screen window is in front; the bar steps aside there.
     private var coveredScreens = Set<CGDirectDisplayID>()
@@ -302,7 +309,13 @@ final class TopBarController {
         model.track = nowPlaying.track
 
         let workspace = NSWorkspace.shared.notificationCenter
-        observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) { $0.refreshDesktops(); $0.refreshWallpaperColors(); $0.scheduleLayout(after: 0.4) }
+        observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {
+            $0.refreshDesktops()
+            $0.refreshWallpaperColors()
+            $0.scheduleLayout(after: 0.4)
+            // Each desktop can have its own wallpaper; take the strip again once the switch has settled.
+            $0.refreshBackdrops(after: 0.8)
+        }
         observe(workspace, NSWorkspace.didActivateApplicationNotification) {
             $0.refreshFrontApp()
             $0.refreshDesktops()
@@ -316,7 +329,7 @@ final class TopBarController {
         }
         observe(workspace, NSWorkspace.didWakeNotification) { $0.tick(); $0.refreshDesktops(); $0.layout() }
         observe(.default, NSApplication.didChangeScreenParametersNotification) { $0.layout() }
-        observe(.default, WallpaperPalette.didChange) { $0.applyLook() }
+        observe(.default, WallpaperPalette.didChange) { $0.applyLook(); $0.refreshBackdrops(after: 0.2) }
         observe(.default, .NSSystemTimeZoneDidChange) { $0.tick() }
         // A right-click menu opening closes any pop-up, so the two don't overlap.
         observe(.default, NSMenu.didBeginTrackingNotification) { $0.popover.hide() }
@@ -339,6 +352,7 @@ final class TopBarController {
         refreshFrontApp()
         refreshDesktops()
         checkCovered()
+        refreshBackdrops(after: 1)
     }
 
     private func stop() {
@@ -356,6 +370,8 @@ final class TopBarController {
         revealTimer?.invalidate()
         revealTimer = nil
         endHold()
+        backdropTask?.cancel()
+        model.backdrops = [:]
         pendingLayout?.cancel()
         popover.hide()
         model.thinScreens = []
@@ -466,7 +482,14 @@ final class TopBarController {
             entry.panel.orderOut(nil)
             panels[id] = nil
         }
-        if model.layouts != layouts { model.layouts = layouts }
+        if model.layouts != layouts {
+            // The bars moved or changed size, so the strips behind them need taking again.
+            if model.layouts.mapValues(\.width) != layouts.mapValues(\.width) || replacesMenuBar != backdropsAtTop {
+                refreshBackdrops(after: 0.5)
+            }
+            model.layouts = layouts
+        }
+        backdropsAtTop = replacesMenuBar
         if model.thinScreens != thin { model.thinScreens = thin }
         DockSpaceKeeper.shared.reserveTop(reserved)
     }
@@ -531,6 +554,7 @@ final class TopBarController {
     /// aside once the pointer has been held at the top for a moment.
     private func pointerAtTop(of id: CGDirectDisplayID) {
         guard BarSettings.takesMenuBarsPlace, revealTimer == nil, !coveredScreens.contains(id) else { return }
+        if Date().timeIntervalSince(backdropsTaken) > 120 { refreshBackdrops(after: 0) }
         if holdScreen != id { heldSince = Date() }
         holdScreen = id
         leftTopSince = nil
@@ -574,6 +598,42 @@ final class TopBarController {
         heldSince = nil
         leftTopSince = nil
         if !keepBackdrop { model.backdropScreens = [] }
+    }
+
+    /// Takes a picture of the wallpaper behind each bar (leaving out every window, the macOS menu
+    /// bar and the bar itself), for filling the bar in while the pointer is at the top. Needs
+    /// Screen Recording permission; without it the bar isn't filled in.
+    private func refreshBackdrops(after delay: TimeInterval) {
+        guard running, BarSettings.takesMenuBarsPlace, CGPreflightScreenCaptureAccess() else { return }
+        backdropTask?.cancel()
+        let bars = panels.compactMap { id, entry -> (key: String, id: CGDirectDisplayID, frame: NSRect, scale: CGFloat)? in
+            guard !coveredScreens.contains(id), let screen = NSScreen.screens.first(where: { $0.displayID == id }) else { return nil }
+            // The bar's place on its screen, measured from the screen's top-left corner.
+            let frame = barFrame(on: screen, replacesMenuBar: true)
+            let local = NSRect(x: frame.minX - screen.frame.minX, y: screen.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
+            return (String(id), id, local, screen.backingScaleFactor)
+        }
+        backdropTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled,
+                  let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
+            var images: [String: CGImage] = [:]
+            for bar in bars {
+                guard let display = content.displays.first(where: { $0.displayID == bar.id }) else { continue }
+                let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
+                let config = SCStreamConfiguration()
+                config.sourceRect = bar.frame
+                config.width = Int(bar.frame.width * bar.scale)
+                config.height = Int(bar.frame.height * bar.scale)
+                config.showsCursor = false
+                if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                    images[bar.key] = image
+                }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.model.backdrops = images
+            self.backdropsTaken = Date()
+        }
     }
 
     /// The pointer was held at the top, so step out of the way of the macOS menu bar, and come back

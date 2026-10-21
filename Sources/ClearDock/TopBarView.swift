@@ -26,11 +26,10 @@ struct TopBarView: View {
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {
-                    // Filled in while the pointer is at the top, hiding the macOS menu bar underneath.
-                    if model.backdropScreens.contains(screenKey) {
-                        Rectangle().fill(Color(nsColor: look.fill))
-                            .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1) }
-                            .transition(.opacity)
+                    // While the pointer is at the top, the wallpaper that's behind the bar is drawn
+                    // in, so the bar looks the same but hides the macOS menu bar sliding down underneath.
+                    if model.backdropScreens.contains(screenKey), let backdrop = model.backdrops[screenKey] {
+                        Image(decorative: backdrop, scale: 1).resizable()
                     }
                 }
                 .contentShape(Rectangle())
@@ -40,7 +39,7 @@ struct TopBarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\.barLook, look)
         .animation(.easeInOut(duration: 0.45), value: look)
-        .animation(.easeOut(duration: 0.12), value: model.backdropScreens)
+
     }
 
     private func row(_ side: BarSide, _ layout: BarLayout) -> some View {
