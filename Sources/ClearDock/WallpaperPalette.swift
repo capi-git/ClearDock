@@ -1,0 +1,95 @@
+import AppKit
+import ScreenCaptureKit
+
+/// Colours taken from the wallpaper that's actually showing, so the dock can match it. It looks at
+/// the screen with every window left out, which also works with live-wallpaper apps. Only runs
+/// when a setting uses wallpaper colours, and only when the wallpaper or desktop changes.
+@MainActor
+final class WallpaperPalette {
+    static let shared = WallpaperPalette()
+    static let didChange = Notification.Name("ClearDockWallpaperPaletteChanged")
+
+    /// A calm colour from along the bottom of the wallpaper, for backgrounds.
+    private(set) var base = NSColor(srgbRed: 0.16, green: 0.18, blue: 0.22, alpha: 1)
+    /// The wallpaper's most colourful tone, for markers and icon tints.
+    private(set) var accent = NSColor(srgbRed: 0.45, green: 0.72, blue: 1, alpha: 1)
+
+    private var task: Task<Void, Never>?
+
+    func refresh(for screen: NSScreen?) {
+        guard let screen else { return }
+        task?.cancel()
+        task = Task { @MainActor [weak self] in
+            guard let image = await Self.wallpaperImage(for: screen) else { return }
+            guard let self, !Task.isCancelled, let colors = Self.colors(in: image) else { return }
+            if colors.base.hexString == self.base.hexString && colors.accent.hexString == self.accent.hexString { return }
+            self.base = colors.base
+            self.accent = colors.accent
+            NotificationCenter.default.post(name: Self.didChange, object: nil)
+        }
+    }
+
+    /// A small picture of the desktop with no windows on it.
+    private static func wallpaperImage(for screen: NSScreen) async -> CGImage? {
+        let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        if CGPreflightScreenCaptureAccess(),
+           let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+           let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first {
+            // Leave out every ordinary window (and anything above them), keeping the wallpaper.
+            let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
+            let config = SCStreamConfiguration()
+            config.width = 96
+            config.height = max(24, Int(96 * screen.frame.height / screen.frame.width))
+            config.showsCursor = false
+            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                return image
+            }
+        }
+        // Without Screen Recording permission, fall back to the wallpaper picture file.
+        guard let url = NSWorkspace.shared.desktopImageURL(for: screen), let picture = NSImage(contentsOf: url) else { return nil }
+        var rect = CGRect(x: 0, y: 0, width: 96, height: 54)
+        return picture.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    private static func colors(in image: CGImage) -> (base: NSColor, accent: NSColor)? {
+        let width = 48, height = max(12, image.height * 48 / max(image.width, 1))
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let data = context.data else { return nil }
+        let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+
+        // Base: the average of the bottom fifth, where the dock sits (rows are stored top first).
+        var sum = (r: 0.0, g: 0.0, b: 0.0), count = 0.0
+        let stripRows = max(1, height / 5)
+        // Accent: group pixels by hue, weighting colourful, bright ones, and take the strongest group.
+        var bins = Array(repeating: (weight: 0.0, r: 0.0, g: 0.0, b: 0.0), count: 12)
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                let r = Double(pixels[i]) / 255, g = Double(pixels[i + 1]) / 255, b = Double(pixels[i + 2]) / 255
+                if y >= height - stripRows { sum.r += r; sum.g += g; sum.b += b; count += 1 }
+                let color = NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
+                let s = Double(color.saturationComponent), v = Double(color.brightnessComponent)
+                let weight = s * s * v
+                guard weight > 0.02 else { continue }
+                let bin = min(11, Int(Double(color.hueComponent) * 12))
+                bins[bin].weight += weight
+                bins[bin].r += r * weight; bins[bin].g += g * weight; bins[bin].b += b * weight
+            }
+        }
+        guard count > 0 else { return nil }
+        let base = NSColor(srgbRed: sum.r / count, green: sum.g / count, blue: sum.b / count, alpha: 1)
+
+        var accent = NSColor(srgbRed: 0.45, green: 0.72, blue: 1, alpha: 1)
+        if let best = bins.max(by: { $0.weight < $1.weight }), best.weight > 0 {
+            let raw = NSColor(srgbRed: best.r / best.weight, green: best.g / best.weight, blue: best.b / best.weight, alpha: 1)
+            // Make sure the accent reads clearly as a colour against the desktop.
+            accent = NSColor(hue: raw.hueComponent, saturation: max(raw.saturationComponent, 0.5),
+                             brightness: max(raw.brightnessComponent, 0.85), alpha: 1)
+        }
+        return (base, accent)
+    }
+}
