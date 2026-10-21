@@ -26,6 +26,16 @@ struct Desktop: Identifiable, Equatable {
     /// Its front-most window, which can be brought forward to go there.
     let frontWindow: CGWindowID?
     let frontApp: pid_t?
+    /// Its windows, front-most first, for drawing a small picture of it.
+    var windows: [DesktopWindow] = []
+}
+
+/// A window on a desktop, and where it is (in the system's window coordinates, measured from the
+/// top-left of the main screen).
+struct DesktopWindow: Identifiable, Equatable {
+    let id: CGWindowID
+    let app: pid_t
+    let frame: CGRect
 }
 
 enum DesktopReader {
@@ -39,7 +49,7 @@ enum DesktopReader {
         let me = getpid()
         let regular = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier))
         let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        var onDesktop: [UInt64: [(window: CGWindowID, app: pid_t)]] = [:]
+        var onDesktop: [UInt64: [DesktopWindow]] = [:]
         for info in windows {
             guard (info[kCGWindowLayer as String] as? Int) == 0,
                   let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me, regular.contains(pid),
@@ -51,7 +61,7 @@ enum DesktopReader {
             // Skip windows on every desktop, and ones that aren't on any.
             let spaces = WindowSpaces.spaceIDs(of: id)
             guard spaces.count == 1 else { continue }
-            onDesktop[spaces[0], default: []].append((id, pid))
+            onDesktop[spaces[0], default: []].append(DesktopWindow(id: id, app: pid, frame: rect))
         }
 
         var number = 0
@@ -72,7 +82,7 @@ enum DesktopReader {
                 let uuid = space["uuid"] as? String ?? ""
                 desktops.append(Desktop(id: id, number: number, key: uuid.isEmpty ? "\(displayID)#\(index)" : uuid,
                                         isCurrent: id == current, stepsFromCurrent: currentPlace.map { index - $0 }, apps: apps,
-                                        frontWindow: windows.first?.window, frontApp: windows.first?.app))
+                                        frontWindow: windows.first?.id, frontApp: windows.first?.app, windows: windows))
             }
             result[displayID] = desktops
         }
@@ -196,21 +206,41 @@ enum DesktopSwitcher {
 // MARK: - Song playing
 
 /// The song playing in Spotify or Apple Music. Both announce every change to any app that
-/// listens, so this needs no permission. Play, pause and skip are sent as media keys, which
-/// work with whatever is playing.
+/// listens, which needs no permission. Asking for the album cover and the playing position, and
+/// controlling the player, goes through AppleScript; macOS asks you once to allow that.
 @MainActor
 final class NowPlaying {
     struct Track: Equatable {
         var title: String
         var artist: String
+        var album = ""
         var isPlaying: Bool
         /// The player's bundle identifier.
         var player: String
+        /// The song's length, and how far in it was at `positionDate`, in seconds.
+        var duration: Double?
+        var position: Double?
+        var positionDate = Date()
+
+        /// Seconds into the song now.
+        var elapsed: Double? {
+            guard let position else { return nil }
+            let played = position + (isPlaying ? Date().timeIntervalSince(positionDate) : 0)
+            return duration.map { min(played, $0) } ?? played
+        }
+
+        /// The same song, whatever its state.
+        func isSameSong(as other: Track?) -> Bool {
+            other?.title == title && other?.artist == artist && other?.player == player
+        }
     }
 
     private(set) var track: Track?
+    /// The current song's album cover, once it has loaded.
+    private(set) var artwork: NSImage?
     var onChange: () -> Void = {}
     private var tokens: [(NotificationCenter, NSObjectProtocol)] = []
+    private var artworkFor: Track?
 
     private static let players = [
         ("com.spotify.client.PlaybackStateChanged", "com.spotify.client"),
@@ -224,9 +254,13 @@ final class NowPlaying {
             let token = distributed.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] note in
                 let info = note.userInfo ?? [:]
                 let state = info["Player State"] as? String ?? ""
-                let title = info["Name"] as? String ?? ""
-                let artist = info["Artist"] as? String ?? ""
-                MainActor.assumeIsolated { self?.update(state: state, title: title, artist: artist, player: player) }
+                var track = Track(title: info["Name"] as? String ?? "", artist: info["Artist"] as? String ?? "",
+                                  album: info["Album"] as? String ?? "", isPlaying: state == "Playing", player: player)
+                // Spotify gives the length in milliseconds and the position in seconds; Music the length only.
+                let length = (info["Duration"] ?? info["Total Time"]) as? NSNumber
+                track.duration = length.map { $0.doubleValue / 1000 }
+                track.position = (info["Playback Position"] as? NSNumber)?.doubleValue
+                MainActor.assumeIsolated { self?.update(state: state, track: track) }
             }
             tokens.append((distributed, token))
         }
@@ -237,6 +271,7 @@ final class NowPlaying {
             MainActor.assumeIsolated {
                 guard let self, self.track?.player == id else { return }
                 self.track = nil
+                self.artwork = nil
                 self.onChange()
             }
         }
@@ -244,58 +279,144 @@ final class NowPlaying {
         askPlayers()
     }
 
-    /// Spotify and Music only announce changes, so when the bar starts, ask whichever is open
-    /// what it's playing now. macOS asks you once to let Clear Dock do this.
-    private func askPlayers() {
-        for (_, player) in Self.players where !NSRunningApplication.runningApplications(withBundleIdentifier: player).isEmpty {
-            let script = """
-                tell application id "\(player)"
-                    set playerState to player state as text
-                    if playerState is "stopped" then return playerState
-                    return playerState & linefeed & (name of current track) & linefeed & (artist of current track)
-                end tell
-                """
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", script]
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            // Run separately, so the bar keeps working while macOS asks for permission.
-            process.terminationHandler = { [weak self] _ in
-                let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                let lines = text.trimmingCharacters(in: .newlines).components(separatedBy: "\n")
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        // Don't override a change the player announced in the meantime.
-                        guard let self, self.track == nil, lines.count >= 2 else { return }
-                        let state = lines[0] == "playing" ? "Playing" : lines[0] == "paused" ? "Paused" : "Stopped"
-                        self.update(state: state, title: lines[1], artist: lines.count > 2 ? lines[2] : "", player: player)
-                    }
-                }
-            }
-            try? process.run()
-        }
-    }
-
     func stop() {
         for (center, token) in tokens { center.removeObserver(token) }
         tokens.removeAll()
         track = nil
+        artwork = nil
+        artworkFor = nil
     }
 
-    private func update(state: String, title: String, artist: String, player: String) {
-        let new = state == "Stopped" || title.isEmpty ? nil : Track(title: title, artist: artist, isPlaying: state == "Playing", player: player)
+    /// Spotify and Music only announce changes, so when the bar starts, ask whichever is open
+    /// what it's playing now.
+    private func askPlayers() {
+        for (_, player) in Self.players where Self.isOpen(player) {
+            let script = """
+                tell application id "\(player)"
+                    set playerState to player state as text
+                    if playerState is "stopped" then return playerState
+                    return playerState & linefeed & (name of current track) & linefeed & (artist of current track) & linefeed & (album of current track)
+                end tell
+                """
+            Self.run(script) { [weak self] text in
+                let lines = (text ?? "").components(separatedBy: "\n")
+                // Don't override a change the player announced in the meantime.
+                guard let self, self.track == nil, lines.count >= 2 else { return }
+                let state = lines[0] == "playing" ? "Playing" : lines[0] == "paused" ? "Paused" : "Stopped"
+                let track = Track(title: lines[1], artist: lines.count > 2 ? lines[2] : "", album: lines.count > 3 ? lines[3] : "",
+                                  isPlaying: state == "Playing", player: player)
+                self.update(state: state, track: track)
+                self.refreshPosition()
+            }
+        }
+    }
+
+    private func update(state: String, track new: Track) {
+        let next = state == "Stopped" || new.title.isEmpty ? nil : new
         // A player that pauses or stops shouldn't replace a different one that's still playing.
-        if let current = track, current.player != player, current.isPlaying, new?.isPlaying != true { return }
-        guard new != track else { return }
-        track = new
+        if let current = track, current.player != new.player, current.isPlaying, next?.isPlaying != true { return }
+        var merged = next
+        // Keep what's known about the song (its length and position) when an update leaves it out.
+        if var song = merged, let current = track, song.isSameSong(as: current) {
+            song.duration = song.duration ?? current.duration
+            if song.position == nil, let elapsed = current.elapsed { song.position = elapsed }
+            merged = song
+        }
+        guard merged != track else { return }
+        track = merged
+        if let song = merged, !song.isSameSong(as: artworkFor) {
+            artworkFor = song
+            artwork = nil
+            loadArtwork(for: song)
+        } else if merged == nil {
+            artwork = nil
+            artworkFor = nil
+        }
         onChange()
     }
 
-    static func playPause() { mediaKey(16) }
-    static func next() { mediaKey(17) }
-    static func previous() { mediaKey(18) }
+    /// Whether the player is open. Asking a player that isn't would open it.
+    private static func isOpen(_ player: String) -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: player).isEmpty
+    }
+
+    /// Asks the player how far into the song it is, for the progress bar.
+    func refreshPosition() {
+        guard let song = track, Self.isOpen(song.player) else { return }
+        // Spotify gives the length in milliseconds, Music in seconds.
+        let length = song.player == "com.spotify.client" ? "(duration of current track) / 1000" : "duration of current track"
+        let script = """
+            tell application id "\(song.player)" to return (player position as text) & linefeed & ((\(length)) as text)
+            """
+        Self.run(script) { [weak self] text in
+            let parts = (text ?? "").components(separatedBy: "\n").map { Double($0.replacingOccurrences(of: ",", with: ".")) }
+            guard let self, var current = self.track, current.isSameSong(as: song), let position = parts.first ?? nil else { return }
+            current.position = position
+            current.positionDate = Date()
+            if parts.count > 1, let length = parts[1] { current.duration = length }
+            self.track = current
+            self.onChange()
+        }
+    }
+
+    /// Loads the album cover: Spotify gives a web address for it, Music the picture itself.
+    private func loadArtwork(for song: Track) {
+        guard BarSettings.albumColours || BarSettings.miniPlayer, Self.isOpen(song.player) else { return }
+        if song.player == "com.spotify.client" {
+            Self.run("tell application id \"com.spotify.client\" to return artwork url of current track") { [weak self] text in
+                guard let text, let url = URL(string: text), url.scheme == "https" else { return }
+                URLSession.shared.dataTask(with: url) { data, _, _ in
+                    guard let data else { return }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self?.setArtwork(NSImage(data: data), for: song) }
+                    }
+                }.resume()
+            }
+        } else {
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("cleardock-artwork").path
+            let script = """
+                tell application id "com.apple.Music" to set picture to raw data of artwork 1 of current track
+                set output to open for access (POSIX file "\(file)") with write permission
+                set eof output to 0
+                write picture to output
+                close access output
+                return "\(file)"
+                """
+            Self.run(script) { [weak self] text in
+                guard let text else { return }
+                self?.setArtwork(NSImage(contentsOfFile: text), for: song)
+            }
+        }
+    }
+
+    private func setArtwork(_ image: NSImage?, for song: Track) {
+        guard let image, song.isSameSong(as: track) else { return }
+        artwork = image
+        onChange()
+    }
+
+    // MARK: Controlling the player
+
+    /// Play or pause, the next song, the previous song. Sent to Spotify or Music directly
+    /// (which works even while a game has the keyboard), or as a media key otherwise.
+    func playPause() { send("playpause", mediaKey: 16) }
+    func next() { send("next track", mediaKey: 17) }
+    func previous() { send("previous track", mediaKey: 18) }
+
+    /// Jumps to a point in the song, in seconds.
+    func seek(to seconds: Double) {
+        guard var song = track, Self.isOpen(song.player) else { return }
+        Self.run("tell application id \"\(song.player)\" to set player position to \(seconds)") { _ in }
+        song.position = seconds
+        song.positionDate = Date()
+        track = song
+        onChange()
+    }
+
+    private func send(_ command: String, mediaKey: Int) {
+        guard let player = track?.player, Self.isOpen(player) else { return Self.mediaKey(mediaKey) }
+        Self.run("tell application id \"\(player)\" to \(command)") { _ in }
+    }
 
     /// Presses one of the keyboard's media keys.
     private static func mediaKey(_ key: Int) {
@@ -306,6 +427,26 @@ final class NowPlaying {
                                windowNumber: 0, context: nil, subtype: 8, data1: data, data2: -1)?
                 .cgEvent?.post(tap: .cghidEventTap)
         }
+    }
+
+    /// Runs an AppleScript separately, so the bar keeps working while it runs (or while macOS asks
+    /// for permission), and hands back what it returned, or nil if it failed.
+    private static func run(_ script: String, then handler: @escaping @MainActor (String?) -> Void) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { finished in
+            let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let ok = finished.terminationStatus == 0
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { handler(ok ? text : nil) }
+            }
+        }
+        do { try process.run() } catch { handler(nil) }
     }
 }
 

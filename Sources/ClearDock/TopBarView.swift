@@ -2,23 +2,35 @@ import AppKit
 import SwiftUI
 
 /// One screen's bar: the left items, room in the middle for the notch or an island, and the
-/// right items. Right-click anywhere on it for its settings.
+/// right items. Right-click anywhere on it for its settings. While a game is in front it can be
+/// just a thin line in the highlight colour.
 struct TopBarView: View {
     @ObservedObject var model: TopBarModel
     let screenKey: String
 
     var body: some View {
         let layout = model.layouts[screenKey] ?? BarLayout()
+        // Each screen's bar takes on the colour of the desktop showing there.
+        let look = model.look(for: layout.desktopsKey)
         let side = max(0, (layout.width - 16 - layout.middleGap) / 2)
-        HStack(spacing: 0) {
-            row(.left, layout).frame(width: side, alignment: .leading)
-            Spacer(minLength: 0)
-            row(.right, layout).frame(width: side, alignment: .trailing)
+        Group {
+            if model.thinScreens.contains(screenKey) {
+                LinearGradient(colors: [.clear, Color(nsColor: look.accent), Color(nsColor: look.accent), .clear],
+                               startPoint: .leading, endPoint: .trailing)
+            } else {
+                HStack(spacing: 0) {
+                    row(.left, layout).frame(width: side, alignment: .leading)
+                    Spacer(minLength: 0)
+                    row(.right, layout).frame(width: side, alignment: .trailing)
+                }
+                .padding(.horizontal, 8)
+                .contentShape(Rectangle())
+                .contextMenu { BarSettingsButton() }
+            }
         }
-        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .contextMenu { BarSettingsButton() }
+        .environment(\.barLook, look)
+        .animation(.easeInOut(duration: 0.45), value: look)
     }
 
     private func row(_ side: BarSide, _ layout: BarLayout) -> some View {
@@ -27,6 +39,18 @@ struct TopBarView: View {
                 BarItemView(model: model, kind: item.kind, desktopsKey: layout.desktopsKey)
             }
         }
+    }
+}
+
+private struct BarLookKey: EnvironmentKey {
+    static let defaultValue = BarLook()
+}
+
+extension EnvironmentValues {
+    /// The look of the bar a view is in.
+    var barLook: BarLook {
+        get { self[BarLookKey.self] }
+        set { self[BarLookKey.self] = newValue }
     }
 }
 
@@ -52,9 +76,9 @@ private struct BarItemView: View {
 private struct DesktopPills: View {
     @ObservedObject var model: TopBarModel
     let key: String
+    @Environment(\.barLook) private var look
 
     var body: some View {
-        let look = model.look
         let desktops = model.desktops[key] ?? []
         switch look.desktopStyle {
         case .separate:
@@ -65,6 +89,7 @@ private struct DesktopPills: View {
                         label(desktop, index: index)
                         apps(desktop)
                     }
+                    .onHover { model.hoverDesktop($0 ? desktop : nil) }
                     .contextMenu { menu(desktop) }
                 }
             }
@@ -78,6 +103,7 @@ private struct DesktopPills: View {
                             if look.desktopStyle != .numbers { apps(desktop, showEmpty: false) }
                         }
                         .onTapGesture { DesktopSwitcher.go(to: desktop) }
+                        .onHover { model.hoverDesktop($0 ? desktop : nil) }
                         .contextMenu { menu(desktop) }
                     }
                 }
@@ -88,15 +114,18 @@ private struct DesktopPills: View {
     }
 
     private func number(_ desktop: Desktop, index: Int) -> Int {
-        model.look.numberPerScreen ? index + 1 : desktop.number
+        look.numberPerScreen ? index + 1 : desktop.number
     }
 
     @ViewBuilder private func label(_ desktop: Desktop, index: Int) -> some View {
-        Text(model.desktopNames[desktop.key] ?? "\(number(desktop, index: index))").font(model.look.font(.bold))
+        // A desktop with its own colour shows its number in that colour, until you're on it.
+        let colour = desktop.isCurrent ? nil : model.desktopColours[desktop.key]
+        Text(model.desktopNames[desktop.key] ?? "\(number(desktop, index: index))")
+            .font(look.font(.bold))
+            .foregroundStyle(colour.map { Color(nsColor: $0.color) } ?? (desktop.isCurrent ? look.onAccent : look.text))
     }
 
     @ViewBuilder private func apps(_ desktop: Desktop, showEmpty: Bool = true) -> some View {
-        let look = model.look
         if desktop.apps.isEmpty {
             if showEmpty && model.desktopNames[desktop.key] == nil { Text("–").opacity(0.45) }
         } else {
@@ -112,9 +141,40 @@ private struct DesktopPills: View {
     @ViewBuilder private func menu(_ desktop: Desktop) -> some View {
         Button("Name Desktop \(desktop.number)…") { model.rename(desktop) }
         if model.desktopNames[desktop.key] != nil { Button("Show the Number Instead") { model.forget(desktop) } }
+        Menu("Colour") {
+            ForEach(DesktopColour.allCases) { colour in
+                Button {
+                    model.setColour(desktop, colour)
+                } label: {
+                    Label { Text(colour.title) } icon: { Image(nsImage: Swatches.image(colour.color)) }
+                }
+            }
+            if model.desktopColours[desktop.key] != nil {
+                Divider()
+                Button("No Colour") { model.setColour(desktop, nil) }
+            }
+        }
         Divider()
         Button("Hide Desktops") { model.hide(.desktops) }
         BarSettingsButton()
+    }
+}
+
+/// Small coloured dots for menus.
+enum Swatches {
+    @MainActor private static var made: [String: NSImage] = [:]
+
+    @MainActor static func image(_ color: NSColor) -> NSImage {
+        let key = color.hexString
+        if let image = made[key] { return image }
+        let image = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        image.isTemplate = false
+        made[key] = image
+        return image
     }
 }
 
@@ -147,9 +207,9 @@ private struct Segment<Content: View>: View {
 
 private struct AppPill: View {
     @ObservedObject var model: TopBarModel
+    @Environment(\.barLook) private var look
 
     var body: some View {
-        let look = model.look
         // Clicking shows all of the app's windows (App Exposé).
         Pill(look: look, action: { CoreDock.send("com.apple.expose.front.awake") }) {
             if let icon = model.appIcon {
@@ -167,21 +227,28 @@ private struct AppPill: View {
 private struct SongPill: View {
     @ObservedObject var model: TopBarModel
     let track: NowPlaying.Track
+    @Environment(\.barLook) private var barLook
 
     var body: some View {
-        let look = model.look
-        Pill(look: look, action: { NowPlaying.playPause() }) {
-            BarSymbol(name: track.isPlaying ? "music.note" : "pause.fill", look: look)
+        // Coloured from the album cover, when that's on.
+        let look = model.songLook(barLook)
+        Pill(look: look, action: model.playPause) {
+            if track.isPlaying {
+                SoundBars(color: Color(nsColor: look.accent), height: look.size.fontSize)
+            } else {
+                BarSymbol(name: "pause.fill", look: look)
+            }
             Text(Self.shortened(track.title, to: 34))
             if !track.artist.isEmpty {
                 Text(Self.shortened(track.artist, to: 22)).opacity(0.55)
             }
         }
         .opacity(track.isPlaying ? 1 : 0.8)
+        .onHover { model.hoverSong($0) }
         .contextMenu {
-            Button(track.isPlaying ? "Pause" : "Play") { NowPlaying.playPause() }
-            Button("Next Song") { NowPlaying.next() }
-            Button("Previous Song") { NowPlaying.previous() }
+            Button(track.isPlaying ? "Pause" : "Play") { model.playPause() }
+            Button("Next Song") { model.nextSong() }
+            Button("Previous Song") { model.previousSong() }
             Divider()
             Button(track.player == "com.spotify.client" ? "Open Spotify" : "Open Music") {
                 if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: track.player) {
@@ -200,11 +267,32 @@ private struct SongPill: View {
     }
 }
 
-private struct VolumePill: View {
-    @ObservedObject var model: TopBarModel
+/// Four little bars that bounce while the song plays, redrawn about a dozen times a second.
+private struct SoundBars: View {
+    let color: Color
+    let height: CGFloat
+    private static let speeds = [2.6, 3.7, 3.1, 4.2]
+    private static let phases = [0.0, 1.3, 2.1, 0.7]
 
     var body: some View {
-        let look = model.look
+        TimelineView(.periodic(from: .now, by: 1.0 / 12)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 1.5) {
+                ForEach(0..<4, id: \.self) { bar in
+                    let level = 0.3 + 0.7 * abs(sin(time * Self.speeds[bar] + Self.phases[bar]))
+                    Capsule().fill(color).frame(width: 2.2, height: max(2, height * level))
+                }
+            }
+            .frame(height: height)
+        }
+    }
+}
+
+private struct VolumePill: View {
+    @ObservedObject var model: TopBarModel
+    @Environment(\.barLook) private var look
+
+    var body: some View {
         let level = model.volume
         let symbol: String = if model.muted || level == 0 {
             "speaker.slash.fill"
@@ -234,9 +322,9 @@ private struct VolumePill: View {
 private struct BatteryPill: View {
     @ObservedObject var model: TopBarModel
     let percent: Int
+    @Environment(\.barLook) private var look
 
     var body: some View {
-        let look = model.look
         let symbol = model.charging ? "battery.100percent.bolt"
             : percent >= 88 ? "battery.100percent" : percent >= 63 ? "battery.75percent"
             : percent >= 38 ? "battery.50percent" : percent >= 13 ? "battery.25percent" : "battery.0percent"
@@ -254,9 +342,9 @@ private struct BatteryPill: View {
 
 private struct ClockPill: View {
     @ObservedObject var model: TopBarModel
+    @Environment(\.barLook) private var look
 
     var body: some View {
-        let look = model.look
         Pill(look: look, action: {
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Calendar.app"))
         }) {
@@ -292,7 +380,7 @@ struct Pill<Content: View>: View {
             .frame(height: look.size.pillHeight)
         Group {
             if look.style == .glass && !highlighted {
-                label.glassEffect(.regular, in: shape)
+                label.glassEffect(.regular.tint(look.glassTint.map { Color(nsColor: $0).opacity(0.35) }), in: shape)
             } else {
                 label.background { PillBackground(look: look, highlighted: highlighted, shape: shape) }
             }

@@ -14,6 +14,22 @@ struct BarLook: Equatable {
     var use24Hour = false
     var desktopStyle = DesktopStyle.separate
     var numberPerScreen = false
+    var peekDesktops = true
+    var albumColours = true
+    var miniPlayer = true
+    /// A colour the glass is tinted with, for a desktop's or an album's colour.
+    var glassTint: NSColor?
+
+    /// The look shifted towards a colour: the highlight becomes it, and the bar's own colour leans
+    /// towards a dark shade of it (or of `base`, when given), so the text stays readable.
+    func tinted(_ colour: NSColor, base: NSColor? = nil) -> BarLook {
+        var look = self
+        look.accent = colour
+        let dark = (base ?? colour).blended(withFraction: base == nil ? 0.72 : 0.45, of: .black) ?? colour
+        look.fill = fill.blended(withFraction: 0.6, of: dark) ?? fill
+        look.glassTint = colour
+        return look
+    }
 
     /// Dark text on a light bar, light text otherwise.
     var text: Color {
@@ -41,6 +57,12 @@ struct BarLayout: Equatable {
     var desktopsKey = "Main"
 }
 
+/// Colours taken from an album cover.
+struct ArtColours: Equatable {
+    let base: NSColor
+    let accent: NSColor
+}
+
 /// Everything the bar views draw from. Shared by the bars on every screen.
 @MainActor
 final class TopBarModel: ObservableObject {
@@ -58,13 +80,39 @@ final class TopBarModel: ObservableObject {
     @Published var charging = false
     @Published var pluggedIn = false
     @Published var now = Date()
+    @Published var desktopColours: [String: DesktopColour] = [:]
+    @Published var artwork: NSImage?
+    @Published var artColours: ArtColours?
+    /// Screens whose bar is a thin line while a game is in front.
+    @Published var thinScreens = Set<String>()
 
     /// Things the views ask the controller to do.
     var toggleMute: () -> Void = {}
     var changeVolume: (Float) -> Void = { _ in }
     var rename: (Desktop) -> Void = { _ in }
     var forget: (Desktop) -> Void = { _ in }
+    var setColour: (Desktop, DesktopColour?) -> Void = { _, _ in }
     var hide: (BarItemKind) -> Void = { _ in }
+    var playPause: () -> Void = {}
+    var nextSong: () -> Void = {}
+    var previousSong: () -> Void = {}
+    var seek: (Double) -> Void = { _ in }
+    /// The pointer moved onto (or, with nil, off) a desktop or the song, for their pop-ups.
+    var hoverDesktop: (Desktop?) -> Void = { _ in }
+    var hoverSong: (Bool) -> Void = { _ in }
+
+    /// The song's look: tinted with the album cover's colours, when that's on.
+    func songLook(_ base: BarLook) -> BarLook {
+        guard base.albumColours, let art = artColours else { return base }
+        return base.tinted(art.accent, base: art.base)
+    }
+
+    /// The look for one screen's bar: tinted with its current desktop's colour, if it has one.
+    func look(for desktopsKey: String) -> BarLook {
+        guard let current = desktops[desktopsKey]?.first(where: \.isCurrent),
+              let colour = desktopColours[current.key] else { return look }
+        return look.tinted(colour.color)
+    }
 
     private var icons: [pid_t: NSImage] = [:]
 
@@ -140,13 +188,22 @@ final class TopBarController {
     private var pendingLayout: DispatchWorkItem?
     /// Screens where a game or another full-screen window is in front; the bar steps aside there.
     private var coveredScreens = Set<CGDirectDisplayID>()
+    /// Bars sliding away from a game right now.
+    private var leaving = Set<CGDirectDisplayID>()
+    private let popover = BarPopover()
 
     init() {
         nowPlaying.onChange = { [weak self] in
             guard let self else { return }
+            let songChanged = !(self.nowPlaying.track?.isSameSong(as: self.model.track) ?? (self.model.track == nil))
             self.model.track = self.nowPlaying.track
+            if self.model.artwork !== self.nowPlaying.artwork {
+                self.model.artwork = self.nowPlaying.artwork
+                self.model.artColours = self.nowPlaying.artwork.flatMap(Self.colours(of:))
+            }
+            if self.model.track == nil, self.popover.showing == "song" { self.popover.hide() }
             // A notch app's island often grows while music plays; make room once it has.
-            self.scheduleLayout(after: 1)
+            if songChanged { self.scheduleLayout(after: 1) }
         }
         volume.onChange = { [weak self] in
             guard let self else { return }
@@ -171,6 +228,18 @@ final class TopBarController {
             BarSettings.desktopNames = names
             NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
         }
+        model.setColour = { desktop, colour in
+            var colours = BarSettings.desktopColours
+            colours[desktop.key] = colour
+            BarSettings.desktopColours = colours
+            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+        }
+        model.playPause = { [weak self] in self?.nowPlaying.playPause() }
+        model.nextSong = { [weak self] in self?.nowPlaying.next() }
+        model.previousSong = { [weak self] in self?.nowPlaying.previous() }
+        model.seek = { [weak self] seconds in self?.nowPlaying.seek(to: seconds) }
+        model.hoverDesktop = { [weak self] desktop in self?.hoverDesktop(desktop) }
+        model.hoverSong = { [weak self] inside in self?.hoverSong(inside) }
         model.hide = { kind in
             BarSettings.items = BarSettings.items.map { $0.kind == kind ? BarItem(kind: $0.kind, side: $0.side, isOn: false) : $0 }
             NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
@@ -188,6 +257,7 @@ final class TopBarController {
         start()
         model.items = BarSettings.items
         model.desktopNames = BarSettings.desktopNames
+        model.desktopColours = BarSettings.desktopColours
         applyLook()
         refreshWallpaperColors()
         layout()
@@ -240,6 +310,8 @@ final class TopBarController {
         observe(.default, NSApplication.didChangeScreenParametersNotification) { $0.layout() }
         observe(.default, WallpaperPalette.didChange) { $0.applyLook() }
         observe(.default, .NSSystemTimeZoneDidChange) { $0.tick() }
+        // A right-click menu opening closes any pop-up, so the two don't overlap.
+        observe(.default, NSMenu.didBeginTrackingNotification) { $0.popover.hide() }
         // Turning "Automatically hide and show the menu bar" on or off moves the bar.
         observe(DistributedNotificationCenter.default(), Notification.Name("AppleInterfaceMenuBarHidingChangedNotification")) {
             $0.scheduleLayout(after: 0.5)
@@ -276,6 +348,9 @@ final class TopBarController {
         revealTimer?.invalidate()
         revealTimer = nil
         pendingLayout?.cancel()
+        popover.hide()
+        model.thinScreens = []
+        leaving.removeAll()
         for (_, entry) in panels { entry.panel.orderOut(nil) }
         panels.removeAll()
         DockSpaceKeeper.shared.reserveTop([])
@@ -313,19 +388,57 @@ final class TopBarController {
         var layouts: [String: BarLayout] = [:]
         var reserved: [(bottom: CGFloat, screen: NSScreen)] = []
         var kept = Set<CGDirectDisplayID>()
+        var thin = Set<String>()
+        let gameMode = BarSettings.gameMode
 
         for screen in screens {
             guard let id = screen.displayID else { continue }
             kept.insert(id)
             let frame = barFrame(on: screen, replacesMenuBar: replacesMenuBar)
+            let isNew = panels[id] == nil
             let entry = panels[id] ?? makePanel(for: id)
-            if entry.panel.frame != frame { entry.panel.setFrame(frame, display: true) }
-            // Out of the way of a game, and keep no room for the bar on that screen.
-            if coveredScreens.contains(id) {
-                entry.panel.orderOut(nil)
+            let panel = entry.panel
+            let wasAway = isNew || !panel.isVisible || leaving.contains(id) || model.thinScreens.contains(String(id))
+
+            // Out of the way of a game, keeping no room for the bar on that screen.
+            if coveredScreens.contains(id) && gameMode != .stay {
+                if gameMode == .line {
+                    // A thin line in the highlight colour along the very top.
+                    thin.insert(String(id))
+                    leaving.remove(id)
+                    let line = NSRect(x: frame.minX, y: frame.maxY - 3, width: frame.width, height: 3)
+                    panel.ignoresMouseEvents = true
+                    if !panel.isVisible {
+                        panel.setFrame(line.offsetBy(dx: 0, dy: 3), display: false)
+                        panel.orderFrontRegardless()
+                    }
+                    if panel.frame != line { Self.animate(panel, to: line, alpha: 1) }
+                } else if panel.isVisible, !leaving.contains(id) {
+                    // Slide up off the top of the screen.
+                    leaving.insert(id)
+                    Self.animate(panel, to: frame.offsetBy(dx: 0, dy: frame.height), alpha: 0) { [weak self] in
+                        guard let self, self.leaving.contains(id) else { return }
+                        self.leaving.remove(id)
+                        panel.orderOut(nil)
+                    }
+                }
                 continue
             }
-            entry.panel.orderFrontRegardless()
+
+            panel.ignoresMouseEvents = revealTimer != nil
+            if wasAway {
+                // Slide back down from the top.
+                leaving.remove(id)
+                if !panel.isVisible || isNew {
+                    panel.setFrame(frame.offsetBy(dx: 0, dy: frame.height), display: false)
+                    panel.alphaValue = 0
+                }
+                panel.orderFrontRegardless()
+                Self.animate(panel, to: frame, alpha: revealTimer == nil ? 1 : 0)
+            } else {
+                if panel.frame != frame { panel.setFrame(frame, display: true) }
+                panel.orderFrontRegardless()
+            }
 
             // Leave the middle clear for the notch, and for any island drawn over the bar.
             var gap: CGFloat = 0
@@ -345,7 +458,19 @@ final class TopBarController {
             panels[id] = nil
         }
         if model.layouts != layouts { model.layouts = layouts }
+        if model.thinScreens != thin { model.thinScreens = thin }
         DockSpaceKeeper.shared.reserveTop(reserved)
+    }
+
+    private static func animate(_ panel: NSPanel, to frame: NSRect, alpha: CGFloat, then done: (@MainActor () -> Void)? = nil) {
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.28
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(frame, display: true)
+            panel.animator().alphaValue = alpha
+        }, completionHandler: {
+            MainActor.assumeIsolated { done?() }
+        })
     }
 
     private func makePanel(for id: CGDirectDisplayID) -> (panel: BarPanel, view: BarHostingView) {
@@ -432,13 +557,14 @@ final class TopBarController {
     }
 
     private func setBarsVisible(_ visible: Bool) {
+        // Bars stepping aside for a game are left as they are.
+        let bars = panels.filter { !coveredScreens.contains($0.key) }.map(\.value.panel)
+        if !visible { popover.hide() }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = visible ? 0.2 : 0.1
-            for (_, entry) in panels {
-                entry.panel.animator().alphaValue = visible ? 1 : 0
-            }
+            for panel in bars { panel.animator().alphaValue = visible ? 1 : 0 }
         }
-        for (_, entry) in panels { entry.panel.ignoresMouseEvents = !visible }
+        for panel in bars { panel.ignoresMouseEvents = !visible }
     }
 
     // MARK: What it shows
@@ -539,7 +665,53 @@ final class TopBarController {
         look.use24Hour = BarSettings.use24Hour
         look.desktopStyle = BarSettings.desktopStyle
         look.numberPerScreen = BarSettings.numberPerScreen
+        look.peekDesktops = BarSettings.peekDesktops
+        look.albumColours = BarSettings.albumColours
+        look.miniPlayer = BarSettings.miniPlayer
         if model.look != look { model.look = look }
+    }
+
+    /// A calm colour and the strongest colour of an album cover.
+    private static func colours(of image: NSImage) -> ArtColours? {
+        var rect = CGRect(x: 0, y: 0, width: 64, height: 64)
+        guard let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil),
+              let colours = WallpaperPalette.colors(in: cg) else { return nil }
+        let base = colours.base.blended(withFraction: 0.5, of: colours.top) ?? colours.base
+        return ArtColours(base: base, accent: colours.accents.first ?? base)
+    }
+
+    // MARK: Pop-ups
+
+    /// The screen under the pointer, and the bottom edge of its bar, for placing a pop-up.
+    private func barUnderPointer() -> (screen: NSScreen, bottom: CGFloat)? {
+        let mouse = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
+              let id = screen.displayID, let panel = panels[id]?.panel, panel.isVisible else { return nil }
+        return (screen, panel.frame.minY)
+    }
+
+    private func hoverDesktop(_ desktop: Desktop?) {
+        guard let desktop, model.look.peekDesktops, !desktop.isCurrent, let bar = barUnderPointer() else {
+            return popover.release()
+        }
+        let look = model.look
+        popover.request("desktop-\(desktop.id)", below: bar.bottom, on: bar.screen) { [weak self] in
+            guard let self else { return AnyView(EmptyView()) }
+            return AnyView(DesktopPeekView(model: self.model, desktop: desktop, screen: bar.screen, look: look) { [weak self] in
+                self?.popover.hide()
+            })
+        }
+    }
+
+    private func hoverSong(_ inside: Bool) {
+        guard inside, model.look.miniPlayer, model.track != nil, let bar = barUnderPointer() else {
+            return popover.release()
+        }
+        if popover.showing != "song" { nowPlaying.refreshPosition() }
+        popover.request("song", below: bar.bottom, on: bar.screen) { [weak self] in
+            guard let self else { return AnyView(EmptyView()) }
+            return AnyView(MiniPlayerView(model: self.model))
+        }
     }
 
     // MARK: Naming desktops

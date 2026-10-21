@@ -162,6 +162,44 @@ final class SettingsStore: ObservableObject {
     @Published var barUse24Hour = false { didSet { edit(keepsTheme: true) { BarSettings.use24Hour = barUse24Hour } } }
     @Published var desktopStyle = DesktopStyle.separate { didSet { edit(keepsTheme: true) { BarSettings.desktopStyle = desktopStyle } } }
     @Published var numberPerScreen = false { didSet { edit(keepsTheme: true) { BarSettings.numberPerScreen = numberPerScreen } } }
+    @Published var peekDesktops = true { didSet { edit(keepsTheme: true) { BarSettings.peekDesktops = peekDesktops } } }
+    @Published var albumColours = true { didSet { edit(keepsTheme: true) { BarSettings.albumColours = albumColours } } }
+    @Published var miniPlayer = true { didSet { edit(keepsTheme: true) { BarSettings.miniPlayer = miniPlayer } } }
+    @Published var gameMode = GameMode.slide { didSet { edit(keepsTheme: true) { BarSettings.gameMode = gameMode } } }
+
+    /// Your desktops, for naming and colouring them.
+    struct DesktopRow: Identifiable {
+        let id: String
+        let number: Int
+        var name: String
+        var colour: DesktopColour?
+    }
+    @Published var desktopRows: [DesktopRow] = []
+
+    func setDesktopName(_ key: String, _ name: String) {
+        var names = BarSettings.desktopNames
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        names[key] = trimmed.isEmpty ? nil : trimmed
+        BarSettings.desktopNames = names
+        if let index = desktopRows.firstIndex(where: { $0.id == key }) { desktopRows[index].name = name }
+        edit(keepsTheme: true) {}
+    }
+
+    func setDesktopColour(_ key: String, _ colour: DesktopColour?) {
+        var colours = BarSettings.desktopColours
+        colours[key] = colour
+        BarSettings.desktopColours = colours
+        if let index = desktopRows.firstIndex(where: { $0.id == key }) { desktopRows[index].colour = colour }
+        edit(keepsTheme: true) {}
+    }
+
+    private func loadDesktops() {
+        let names = BarSettings.desktopNames
+        let colours = BarSettings.desktopColours
+        desktopRows = DesktopReader.read().values.flatMap { $0 }.sorted { $0.number < $1.number }.map {
+            DesktopRow(id: $0.key, number: $0.number, name: names[$0.key] ?? "", colour: colours[$0.key])
+        }
+    }
     @Published var menuBarHidden = false
     @Published var desktopShortcutsOn = false
     @Published var wallpaperAccents: [Color] = []
@@ -266,6 +304,11 @@ final class SettingsStore: ObservableObject {
         barUse24Hour = BarSettings.use24Hour
         desktopStyle = BarSettings.desktopStyle
         numberPerScreen = BarSettings.numberPerScreen
+        peekDesktops = BarSettings.peekDesktops
+        albumColours = BarSettings.albumColours
+        miniPlayer = BarSettings.miniPlayer
+        gameMode = BarSettings.gameMode
+        loadDesktops()
         loadCustomIcons()
         refreshStatus()
         loading = false
@@ -618,6 +661,21 @@ private struct TopBarTab: View {
                 Slider(value: $store.barCornerRadius, in: 0...15) { Text("Corner rounding") }
             }
 
+            Section("Song playing") {
+                Toggle("Colours from the album cover", isOn: $store.albumColours)
+                Toggle("Show a small player when pointing at the song", isOn: $store.miniPlayer)
+            }
+
+            Section {
+                Picker("When a game is in front", selection: $store.gameMode) {
+                    ForEach(GameMode.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text("Also for anything else filling the whole screen. Windows of games are never moved.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("Date and time") {
                 Toggle("Show the date", isOn: $store.barShowDate)
                 Toggle("24-hour clock", isOn: $store.barUse24Hour)
@@ -629,6 +687,23 @@ private struct TopBarTab: View {
                 }
                 .pickerStyle(.segmented)
                 Toggle("Number each screen's desktops from 1", isOn: $store.numberPerScreen)
+                Toggle("Show a picture of a desktop when pointing at it", isOn: $store.peekDesktops)
+                ForEach(store.desktopRows) { row in
+                    HStack(spacing: 10) {
+                        Text("Desktop \(row.number)").frame(width: 80, alignment: .leading)
+                        TextField("Name", text: Binding(get: { row.name }, set: { store.setDesktopName(row.id, $0) }))
+                            .textFieldStyle(.roundedBorder)
+                        Picker("", selection: Binding(get: { row.colour }, set: { store.setDesktopColour(row.id, $0) })) {
+                            Text("No colour").tag(DesktopColour?.none)
+                            ForEach(DesktopColour.allCases) { colour in
+                                Label { Text(colour.title) } icon: { Image(nsImage: Swatches.image(colour.color)) }
+                                    .tag(DesktopColour?.some(colour))
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+                    }
+                }
                 LabeledContent("Switching desktops") {
                     HStack {
                         Text(store.desktopShortcutsOn ? "Ready" : "Needs the Mission Control shortcuts").foregroundStyle(.secondary)
@@ -640,7 +715,7 @@ private struct TopBarTab: View {
             } header: {
                 Text("Desktops")
             } footer: {
-                Text("The desktops match Mission Control, numbered across your screens. Click one to go there. To put an app on a desktop, go to it and open the app, or drag a window onto it in Mission Control. Right-click a desktop to give it a name. The bar switches desktops with macOS's own Mission Control shortcuts, \"Move left a space\" and \"Move right a space\", which are on unless you've turned them off.")
+                Text("The desktops match Mission Control, numbered across your screens. Click one to go there. To put an app on a desktop, go to it and open the app, or drag a window onto it in Mission Control. Right-click a desktop, or use the list above, to give it a name and a colour; the bar takes on the colour of the desktop you're on. The bar switches desktops with macOS's own Mission Control shortcuts, \"Move left a space\" and \"Move right a space\", which are on unless you've turned them off.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

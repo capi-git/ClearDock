@@ -1,0 +1,436 @@
+import AppKit
+import ScreenCaptureKit
+import SwiftUI
+
+/// A small panel that pops up under the bar while the pointer is on a desktop or the song: a
+/// picture of that desktop, or a little player. It stays open while the pointer is on it.
+@MainActor
+final class BarPopover {
+    private let panel = PopoverPanel()
+    private var showWork: DispatchWorkItem?
+    private var hideWork: DispatchWorkItem?
+    /// What's showing, such as "song" or "desktop-…".
+    private(set) var showing: String?
+
+    init() {
+        panel.onEnter = { [weak self] in self?.hideWork?.cancel() }
+        panel.onExit = { [weak self] in self?.scheduleHide() }
+    }
+
+    /// Shows what `content` makes, under the bar, after a short pause. Moving from one desktop to
+    /// the next while a pop-up is open switches straight away.
+    func request(_ id: String, below barBottom: CGFloat, on screen: NSScreen, content: @escaping @MainActor () -> AnyView) {
+        hideWork?.cancel()
+        guard showing != id else { return }
+        showWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.show(id, content(), below: barBottom, on: screen) }
+        }
+        showWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (showing == nil ? 0.35 : 0.05), execute: work)
+    }
+
+    /// The pointer left what the pop-up is for.
+    func release() {
+        showWork?.cancel()
+        scheduleHide()
+    }
+
+    func hide() {
+        showWork?.cancel()
+        hideWork?.cancel()
+        guard showing != nil else { return }
+        showing = nil
+        panel.orderOut(nil)
+        panel.setContent(nil)
+        MemoryRelief.soon()
+    }
+
+    private func show(_ id: String, _ content: AnyView, below barBottom: CGFloat, on screen: NSScreen) {
+        panel.setContent(content)
+        let size = panel.fittingSize
+        // Centred under the pointer, kept on the screen, just below the bar.
+        let mouse = NSEvent.mouseLocation
+        let x = min(max((mouse.x - size.width / 2).rounded(), screen.frame.minX + 8), screen.frame.maxX - size.width - 8)
+        panel.setFrame(NSRect(x: x, y: barBottom - 6 - size.height, width: size.width, height: size.height), display: true)
+        if showing == nil {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                panel.animator().alphaValue = 1
+            }
+        }
+        showing = id
+    }
+
+    private func scheduleHide() {
+        hideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.panel.isVisible && self.panel.frame.contains(NSEvent.mouseLocation) { return }
+                self.hide()
+            }
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+}
+
+/// The pop-up's window: see-through, above the bar, never taking focus from your app.
+@MainActor
+final class PopoverPanel: OverlayPanel {
+    var onEnter: () -> Void = {}
+    var onExit: () -> Void = {}
+    private let container = TrackingView()
+    private var host: NSHostingView<AnyView>?
+
+    override init() {
+        super.init()
+        level = .statusBar
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        ignoresMouseEvents = false
+        contentView = container
+        container.onEnter = { [weak self] in self?.onEnter() }
+        container.onExit = { [weak self] in self?.onExit() }
+    }
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+
+    func setContent(_ content: AnyView?) {
+        host?.removeFromSuperview()
+        host = nil
+        guard let content else { return }
+        let view = FirstClickHostingView(rootView: content)
+        view.autoresizingMask = [.width, .height]
+        container.addSubview(view)
+        host = view
+    }
+
+    var fittingSize: NSSize { host?.fittingSize ?? .zero }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(frameRect, display: flag)
+        host?.frame = container.bounds
+    }
+}
+
+private final class FirstClickHostingView: NSHostingView<AnyView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private final class TrackingView: NSView {
+    var onEnter: () -> Void = {}
+    var onExit: () -> Void = {}
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { onEnter() }
+    override func mouseExited(with event: NSEvent) { onExit() }
+}
+
+/// The pop-up's background: blurred, tinted with the bar's colour, rounded.
+private struct PopoverBackground: View {
+    let look: BarLook
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        ZStack {
+            PopoverBlur().clipShape(shape)
+            shape.fill(Color(nsColor: look.fill).opacity(0.78))
+        }
+        .overlay(shape.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+    }
+}
+
+private struct PopoverBlur: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .hudWindow
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
+// MARK: - Peeking at a desktop
+
+/// A small picture of a desktop: its wallpaper with its windows laid out on it, as they are.
+/// Click a window to bring it forward, or anywhere else to go to that desktop.
+struct DesktopPeekView: View {
+    @ObservedObject var model: TopBarModel
+    let desktop: Desktop
+    let screen: NSScreen
+    let look: BarLook
+    let done: () -> Void
+    @StateObject private var shots = PeekShots()
+
+    private static let width: CGFloat = 380
+
+    var body: some View {
+        let area = Self.topDown(screen.frame)
+        let scale = Self.width / area.width
+        let height = (area.height * scale).rounded()
+        let name = model.desktopNames[desktop.key] ?? "Desktop \(desktop.number)"
+        let apps = desktop.apps.compactMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                if let colour = model.desktopColours[desktop.key] {
+                    Circle().fill(Color(nsColor: colour.color)).frame(width: 8, height: 8)
+                }
+                Text(name).font(.system(size: 13, weight: .bold, design: .rounded))
+                Text(apps.isEmpty ? "Empty" : apps.joined(separator: ", "))
+                    .font(.system(size: 12, design: .rounded)).opacity(0.65).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.white)
+            ZStack(alignment: .topLeading) {
+                Wallpaper(screen: screen, captured: shots.wallpaper).frame(width: Self.width, height: height)
+                // Back to front, so the front window is drawn last.
+                ForEach(desktop.windows.reversed()) { window in
+                    let frame = CGRect(x: (window.frame.minX - area.minX) * scale, y: (window.frame.minY - area.minY) * scale,
+                                       width: max(6, window.frame.width * scale), height: max(6, window.frame.height * scale))
+                    WindowThumbnail(image: shots.images[window.id], icon: model.icon(for: window.app))
+                        .frame(width: frame.width, height: frame.height)
+                        .offset(x: frame.minX, y: frame.minY)
+                        .onTapGesture {
+                            WindowFocus.raise(window.id, of: window.app)
+                            done()
+                        }
+                }
+            }
+            .frame(width: Self.width, height: height, alignment: .topLeading)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                DesktopSwitcher.go(to: desktop)
+                done()
+            }
+        }
+        .padding(10)
+        .background(PopoverBackground(look: look))
+        .task {
+            await shots.loadWallpaper(of: screen, size: CGSize(width: Self.width, height: height))
+            await shots.load(desktop.windows, scale: scale * screen.backingScaleFactor)
+        }
+    }
+
+    private static func topDown(_ rect: NSRect) -> CGRect {
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        return CGRect(x: rect.minX, y: mainHeight - rect.maxY, width: rect.width, height: rect.height)
+    }
+}
+
+private struct WindowThumbnail: View {
+    let image: CGImage?
+    let icon: NSImage?
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 3, style: .continuous)
+        Group {
+            if let image {
+                Image(decorative: image, scale: 1).resizable()
+            } else {
+                // Until the picture arrives (or without Screen Recording permission): the app's icon.
+                shape.fill(Color.white.opacity(0.22))
+                    .overlay {
+                        if let icon { Image(nsImage: icon).resizable().scaledToFit().padding(4).frame(maxWidth: 28, maxHeight: 28) }
+                    }
+            }
+        }
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+    }
+}
+
+/// The screen's wallpaper: as it actually looks (which also works with live wallpapers), or
+/// else its picture file, or else its colours.
+private struct Wallpaper: View {
+    let screen: NSScreen
+    let captured: CGImage?
+    @MainActor private static var cache: [URL: NSImage] = [:]
+
+    var body: some View {
+        if let captured {
+            Image(decorative: captured, scale: 1).resizable().aspectRatio(contentMode: .fill)
+        } else if let image = Self.image(for: screen) {
+            Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+        } else {
+            LinearGradient(colors: [Color(nsColor: WallpaperPalette.shared.top), Color(nsColor: WallpaperPalette.shared.base)],
+                           startPoint: .top, endPoint: .bottom)
+        }
+    }
+
+    @MainActor private static func image(for screen: NSScreen) -> NSImage? {
+        guard let url = NSWorkspace.shared.desktopImageURL(for: screen), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        if let image = cache[url] { return image }
+        // A small copy is plenty for the picture, and keeps memory down.
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let small = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 900,
+              ] as CFDictionary) else { return nil }
+        let image = NSImage(cgImage: small, size: NSSize(width: small.width, height: small.height))
+        cache = [url: image]
+        return image
+    }
+}
+
+/// Pictures of a desktop's windows, taken when the peek opens (Screen Recording permission is
+/// needed) and dropped when it closes.
+@MainActor
+final class PeekShots: ObservableObject {
+    @Published var images: [CGWindowID: CGImage] = [:]
+    @Published var wallpaper: CGImage?
+
+    /// The desktop picture as it looks, kept for a minute per screen so moving between desktops
+    /// doesn't take it again each time.
+    private static var wallpapers: [CGDirectDisplayID: (image: CGImage, taken: Date)] = [:]
+
+    func loadWallpaper(of screen: NSScreen, size: CGSize) async {
+        guard let id = screen.displayID else { return }
+        if let kept = Self.wallpapers[id], Date().timeIntervalSince(kept.taken) < 60 {
+            wallpaper = kept.image
+            return
+        }
+        guard CGPreflightScreenCaptureAccess(),
+              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+              let display = content.displays.first(where: { $0.displayID == id }) else { return }
+        // Everything at the ordinary window level and above is left out, leaving the wallpaper.
+        let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
+        let config = SCStreamConfiguration()
+        config.width = Int(size.width * 2)
+        config.height = Int(size.height * 2)
+        config.showsCursor = false
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else { return }
+        Self.wallpapers[id] = (image, Date())
+        wallpaper = image
+    }
+
+    func load(_ windows: [DesktopWindow], scale: CGFloat) async {
+        guard CGPreflightScreenCaptureAccess(), !windows.isEmpty,
+              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) else { return }
+        for window in windows.prefix(8) {
+            guard !Task.isCancelled, let match = content.windows.first(where: { $0.windowID == window.id }) else { continue }
+            let config = SCStreamConfiguration()
+            config.width = max(16, Int((window.frame.width * scale).rounded()))
+            config.height = max(16, Int((window.frame.height * scale).rounded()))
+            config.showsCursor = false
+            config.ignoreShadowsSingleWindow = true
+            if let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: match),
+                                                                        configuration: config) {
+                images[window.id] = image
+            }
+        }
+    }
+}
+
+// MARK: - The mini player
+
+/// The album cover, the song, a progress bar you can click to jump, and the player's buttons.
+struct MiniPlayerView: View {
+    @ObservedObject var model: TopBarModel
+
+    var body: some View {
+        if let track = model.track {
+            let look = model.songLook(model.look)
+            HStack(spacing: 12) {
+                cover
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(track.title).font(.system(size: 13.5, weight: .bold, design: .rounded)).lineLimit(1)
+                    Text([track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.system(size: 12, design: .rounded)).opacity(0.7).lineLimit(1)
+                    Progress(track: track, accent: Color(nsColor: look.accent), seek: model.seek)
+                    HStack(spacing: 22) {
+                        PlayerButton(symbol: "backward.fill", action: model.previousSong)
+                        PlayerButton(symbol: track.isPlaying ? "pause.fill" : "play.fill", size: 18, action: model.playPause)
+                        PlayerButton(symbol: "forward.fill", action: model.nextSong)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(12)
+            .frame(width: 340)
+            .background(PopoverBackground(look: look))
+        }
+    }
+
+    @ViewBuilder private var cover: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        Group {
+            if let artwork = model.artwork {
+                Image(nsImage: artwork).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                shape.fill(Color.white.opacity(0.12)).overlay(Image(systemName: "music.note").font(.system(size: 26)).opacity(0.6))
+            }
+        }
+        .frame(width: 84, height: 84)
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+    }
+}
+
+private struct Progress: View {
+    let track: NowPlaying.Track
+    let accent: Color
+    let seek: (Double) -> Void
+
+    var body: some View {
+        // Moves along each second while the song plays.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let elapsed = track.elapsed ?? 0
+            let total = track.duration ?? 0
+            VStack(spacing: 3) {
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.18))
+                        Capsule().fill(accent).frame(width: total > 0 ? geometry.size.width * min(1, elapsed / total) : 0)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture(coordinateSpace: .local) { location in
+                        if total > 0 { seek(total * min(1, max(0, location.x / geometry.size.width))) }
+                    }
+                }
+                .frame(height: 4)
+                HStack {
+                    Text(Self.time(elapsed))
+                    Spacer()
+                    Text(total > 0 ? Self.time(total) : "")
+                }
+                .font(.system(size: 10.5, weight: .medium, design: .rounded).monospacedDigit())
+                .opacity(0.6)
+            }
+        }
+    }
+
+    static func time(_ seconds: Double) -> String {
+        let whole = Int(seconds.rounded(.down))
+        return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+}
+
+private struct PlayerButton: View {
+    let symbol: String
+    var size: CGFloat = 14
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size, weight: .bold))
+            .frame(width: 30, height: 26)
+            .contentShape(Rectangle())
+            .opacity(hovering ? 1 : 0.85)
+            .scaleEffect(hovering ? 1.12 : 1)
+            .onHover { hovering = $0 }
+            .onTapGesture(perform: action)
+    }
+}

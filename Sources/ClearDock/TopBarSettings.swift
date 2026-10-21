@@ -77,6 +77,41 @@ enum DesktopStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the bar does while a game (or another full-screen window) is in front on its screen.
+enum GameMode: String, CaseIterable, Identifiable {
+    case slide, line, stay
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .slide: "Slide away"
+        case .line: "Thin line"
+        case .stay: "Stay"
+        }
+    }
+}
+
+/// The colours a desktop can be given. The bar takes on the current desktop's colour.
+enum DesktopColour: String, CaseIterable, Identifiable {
+    case red, orange, yellow, green, mint, teal, blue, indigo, purple, pink
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var color: NSColor {
+        let hex = switch self {
+        case .red: "#FF5F57"
+        case .orange: "#FF9F0A"
+        case .yellow: "#FFD60A"
+        case .green: "#32D74B"
+        case .mint: "#66D4CF"
+        case .teal: "#40C8E0"
+        case .blue: "#0A84FF"
+        case .indigo: "#5E5CE6"
+        case .purple: "#BF5AF2"
+        case .pink: "#FF375F"
+        }
+        return NSColor(hex: hex)!
+    }
+}
+
 enum BarFont: String, CaseIterable, Identifiable {
     case rounded, standard, mono
     var id: String { rawValue }
@@ -189,6 +224,38 @@ enum BarSettings {
     static var numberPerScreen: Bool {
         get { defaults.bool(forKey: "bar.numberPerScreen") }
         set { defaults.set(newValue, forKey: "bar.numberPerScreen") }
+    }
+
+    /// Colours you've given desktops, by the desktop's id.
+    static var desktopColours: [String: DesktopColour] {
+        get {
+            (defaults.dictionary(forKey: "bar.desktopColours") as? [String: String] ?? [:])
+                .compactMapValues(DesktopColour.init(rawValue:))
+        }
+        set { defaults.set(newValue.mapValues(\.rawValue), forKey: "bar.desktopColours") }
+    }
+
+    /// Pointing at a desktop shows a small live picture of it.
+    static var peekDesktops: Bool {
+        get { defaults.object(forKey: "bar.peekDesktops") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "bar.peekDesktops") }
+    }
+
+    /// The song piece takes its colours from the album cover.
+    static var albumColours: Bool {
+        get { defaults.object(forKey: "bar.albumColours") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "bar.albumColours") }
+    }
+
+    /// Pointing at the song shows a small player.
+    static var miniPlayer: Bool {
+        get { defaults.object(forKey: "bar.miniPlayer") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "bar.miniPlayer") }
+    }
+
+    static var gameMode: GameMode {
+        get { defaults.string(forKey: "bar.gameMode").flatMap(GameMode.init(rawValue:)) ?? .slide }
+        set { defaults.set(newValue.rawValue, forKey: "bar.gameMode") }
     }
 
     /// Names you've given desktops, by the desktop's id.

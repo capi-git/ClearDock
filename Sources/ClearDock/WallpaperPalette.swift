@@ -59,7 +59,7 @@ final class WallpaperPalette {
         return picture.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }
 
-    private static func colors(in image: CGImage) -> (base: NSColor, top: NSColor, accents: [NSColor])? {
+    static func colors(in image: CGImage) -> (base: NSColor, top: NSColor, accents: [NSColor])? {
         let width = 48, height = max(12, image.height * 48 / max(image.width, 1))
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
