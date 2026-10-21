@@ -736,9 +736,9 @@ final class TopBarController {
         // Still up where the menu bar is.
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
            mouse.y > screen.frame.maxY - 60 { return }
-        // The pointer may be down in an open menu, with the menu bar still showing. Stay out of
-        // its way, but not for long, in case the menu bar can't be seen in the window list.
-        if Date().timeIntervalSince(revealStarted) < 8, Self.menuBarShowing() { return }
+        // Stay out of the way for as long as the macOS menu bar is down or one of its menus is open,
+        // however long you take. (Five minutes at most, in case macOS ever stops showing either.)
+        if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarShowing() || Self.menuOpen() { return }
         revealTimer?.invalidate()
         revealTimer = nil
         model.backdropScreens = []
@@ -755,6 +755,15 @@ final class TopBarController {
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
             return NSScreen.screens.contains { abs(topDown($0.frame).minY - rect.minY) < 1 && rect.width >= $0.frame.width - 1 }
+        }
+    }
+
+    /// Whether a menu (from the menu bar or a right-click) is open, in any app.
+    private static func menuOpen() -> Bool {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let level = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        return windows.contains { info in
+            info[kCGWindowLayer as String] as? Int == level && (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.5
         }
     }
 
@@ -884,11 +893,14 @@ final class TopBarController {
 
     // MARK: Pop-ups
 
-    /// The screen under the pointer, and the bottom edge of its bar, for placing a pop-up.
+    /// The screen under the pointer, and the bottom edge of its bar, for placing a pop-up. Nil while
+    /// that bar is out of the way (for the macOS menu bar, Mission Control or a game), so moving
+    /// across where it was doesn't open anything.
     private func barUnderPointer() -> (screen: NSScreen, bottom: CGFloat)? {
         let mouse = NSEvent.mouseLocation
-        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
-              let id = screen.displayID, let panel = panels[id]?.panel, panel.isVisible else { return nil }
+        guard revealTimer == nil, let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
+              let id = screen.displayID, let panel = panels[id]?.panel, panel.isVisible, panel.alphaValue > 0.5,
+              !exposeScreens.contains(id), !coveredScreens.contains(id) else { return nil }
         return (screen, panel.frame.minY)
     }
 
