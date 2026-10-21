@@ -15,10 +15,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     var onOpenChanged: (Bool) -> Void = { _ in }
 
     private var window: NSWindow?
+    private var store: SettingsStore?
 
-    func show() {
+    func show(tab: SettingsTab? = nil) {
         if window == nil {
             let store = SettingsStore(onChange: { [weak self] in self?.onChange() })
+            self.store = store
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
                 styleMask: [.titled, .closable, .miniaturizable],
@@ -31,6 +33,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             self.window = window
             onOpenChanged(true)
         }
+        if let tab { store?.tab = tab }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
@@ -39,10 +42,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         window?.delegate = nil
         window = nil
+        store = nil
         NSApp.setActivationPolicy(.accessory)
         onOpenChanged(false)
         MemoryRelief.soon()
     }
+}
+
+enum SettingsTab: String, Hashable {
+    case look, topBar, behaviour, permissions, about
 }
 
 /// The settings, as the window shows and edits them.
@@ -56,6 +64,11 @@ final class SettingsStore: ObservableObject {
     init(onChange: @escaping () -> Void) {
         changed = onChange
         reload()
+    }
+
+    /// The window opens on the tab you last used.
+    @Published var tab = UserDefaults.standard.string(forKey: "settingsTab").flatMap(SettingsTab.init(rawValue:)) ?? .look {
+        didSet { UserDefaults.standard.set(tab.rawValue, forKey: "settingsTab") }
     }
 
     // Look
@@ -119,6 +132,43 @@ final class SettingsStore: ObservableObject {
                 loading = false
             }
         }
+    }
+
+    // Top bar
+    @Published var barEnabled = false { didSet { edit(keepsTheme: true) { BarSettings.enabled = barEnabled } } }
+    @Published var barAllScreens = true { didSet { edit(keepsTheme: true) { BarSettings.allScreens = barAllScreens } } }
+    @Published var barItems: [BarItem] = [] { didSet { edit(keepsTheme: true) { BarSettings.items = barItems } } }
+    @Published var barStyle = BarStyle.wallpaper { didSet { edit(keepsTheme: true) { BarSettings.style = barStyle } } }
+    @Published var barColor = Color.black { didSet { edit(keepsTheme: true) { BarSettings.color = NSColor(barColor) } } }
+    @Published var barOpacity = 0.62 { didSet { edit(keepsTheme: true) { BarSettings.opacity = barOpacity } } }
+    @Published var barAccentIndex = 0 { didSet { edit(keepsTheme: true) { BarSettings.accentIndex = barAccentIndex } } }
+    @Published var barAccentColor = Color.blue {
+        didSet { edit(keepsTheme: true) { BarSettings.accentColor = NSColor(barAccentColor) } }
+    }
+    @Published var barSize = BarSize.medium { didSet { edit(keepsTheme: true) { BarSettings.size = barSize } } }
+    @Published var barFont = BarFont.rounded { didSet { edit(keepsTheme: true) { BarSettings.font = barFont } } }
+    @Published var barCornerRadius = 9.0 { didSet { edit(keepsTheme: true) { BarSettings.cornerRadius = barCornerRadius } } }
+    @Published var barShowDate = true { didSet { edit(keepsTheme: true) { BarSettings.showDate = barShowDate } } }
+    @Published var barUse24Hour = false { didSet { edit(keepsTheme: true) { BarSettings.use24Hour = barUse24Hour } } }
+    @Published var menuBarHidden = false
+    @Published var desktopShortcutsOn = false
+    @Published var wallpaperAccents: [Color] = []
+
+    func moveBarItem(_ item: BarItem, by offset: Int) {
+        // Moves among the items on the same side, which is the order you see in the bar.
+        let sameSide = barItems.indices.filter { barItems[$0].side == item.side }
+        guard let position = sameSide.firstIndex(where: { barItems[$0].id == item.id }),
+              sameSide.indices.contains(position + offset) else { return }
+        barItems.swapAt(sameSide[position], sameSide[position + offset])
+    }
+
+    func setBarItem(_ item: BarItem) {
+        guard let index = barItems.firstIndex(where: { $0.id == item.id }) else { return }
+        barItems[index] = item
+    }
+
+    func resetBarItems() {
+        barItems = BarSettings.defaultItems
     }
 
     /// Apps you've given your own icon: (app id, app name, picture path).
@@ -188,6 +238,19 @@ final class SettingsStore: ObservableObject {
         clickToHide = Settings.clickToHide
         hideSystemDock = Settings.hideSystemDock
         openAtLogin = LoginItem.isEnabled
+        barEnabled = BarSettings.enabled
+        barAllScreens = BarSettings.allScreens
+        barItems = BarSettings.items
+        barStyle = BarSettings.style
+        barColor = Color(nsColor: BarSettings.color)
+        barOpacity = BarSettings.opacity
+        barAccentIndex = BarSettings.accentIndex
+        barAccentColor = Color(nsColor: BarSettings.accentColor)
+        barSize = BarSettings.size
+        barFont = BarSettings.font
+        barCornerRadius = BarSettings.cornerRadius
+        barShowDate = BarSettings.showDate
+        barUse24Hour = BarSettings.use24Hour
         loadCustomIcons()
         refreshStatus()
         loading = false
@@ -199,6 +262,9 @@ final class SettingsStore: ObservableObject {
         hasScreenRecording = CGPreflightScreenCaptureAccess()
         wallpaperBase = Color(nsColor: WallpaperPalette.shared.base)
         wallpaperAccent = Color(nsColor: WallpaperPalette.shared.accent)
+        wallpaperAccents = WallpaperPalette.shared.accents.map { Color(nsColor: $0) }
+        menuBarHidden = BarSettings.macMenuBarHidden
+        desktopShortcutsOn = DesktopSwitcher.shortcutsOn
     }
 
     func apply(_ theme: DockTheme) {
@@ -275,15 +341,22 @@ struct SettingsView: View {
     @ObservedObject var store: SettingsStore
 
     var body: some View {
-        TabView {
+        TabView(selection: $store.tab) {
             LookTab(store: store)
                 .tabItem { Label("Look", systemImage: "paintpalette") }
+                .tag(SettingsTab.look)
+            TopBarTab(store: store)
+                .tabItem { Label("Top Bar", systemImage: "menubar.rectangle") }
+                .tag(SettingsTab.topBar)
             BehaviourTab(store: store)
                 .tabItem { Label("Behaviour", systemImage: "slider.horizontal.3") }
+                .tag(SettingsTab.behaviour)
             PermissionsTab(store: store)
                 .tabItem { Label("Permissions", systemImage: "lock.shield") }
+                .tag(SettingsTab.permissions)
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
+                .tag(SettingsTab.about)
         }
         .frame(width: 640, height: 620)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -442,6 +515,149 @@ private struct LookTab: View {
     }
 }
 
+private struct TopBarTab: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Show the top bar", isOn: $store.barEnabled)
+                Toggle("On every screen", isOn: $store.barAllScreens)
+                    .disabled(!store.barEnabled)
+                LabeledContent("macOS menu bar") {
+                    HStack {
+                        Text(store.menuBarHidden ? "Hidden: the top bar takes its place" : "Showing: the top bar sits under it")
+                            .foregroundStyle(.secondary)
+                        Button("Change…") { BarSettings.openMenuBarSettings() }
+                    }
+                }
+            } footer: {
+                Text("For the top bar to replace the macOS menu bar, set \"Automatically hide and show the menu bar\" to Always. Push the pointer to the very top of the screen to get the macOS menus back. The bar leaves room for the camera notch and for notch apps like Vorssaint.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                ForEach(BarSide.allCases) { side in
+                    let items = store.barItems.filter { $0.side == side }
+                    ForEach(Array(items.enumerated()), id: \.element.id) { position, item in
+                        BarItemRow(item: item, first: position == 0, last: position == items.count - 1, store: store)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("What's in it")
+                    Spacer()
+                    Button("Reset") { store.resetBarItems() }.controlSize(.small)
+                }
+            } footer: {
+                Text("Each side reads left to right in this order. Right-click anything in the bar to hide it or change it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Look") {
+                Picker("Background", selection: $store.barStyle) {
+                    ForEach(BarStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                if store.barStyle == .color {
+                    ColorPicker("Colour", selection: $store.barColor, supportsOpacity: false)
+                }
+                if store.barStyle == .color || store.barStyle == .wallpaper {
+                    Slider(value: $store.barOpacity, in: 0.15...1) { Text("Strength") }
+                }
+                LabeledContent("Highlight") {
+                    HStack(spacing: 8) {
+                        ForEach(Array(store.wallpaperAccents.enumerated()), id: \.offset) { index, color in
+                            Button { store.barAccentIndex = index } label: {
+                                Swatch(color: color)
+                                    .overlay(RoundedRectangle(cornerRadius: 5)
+                                        .strokeBorder(Color.accentColor, lineWidth: store.barAccentIndex == index ? 2.5 : 0))
+                            }
+                            .buttonStyle(.plain)
+                            .help("A colour from your wallpaper")
+                        }
+                        Divider().frame(height: 18)
+                        Button { store.barAccentIndex = -1 } label: {
+                            Text("Own colour")
+                                .foregroundStyle(store.barAccentIndex == -1 ? Color.accentColor : .primary)
+                        }
+                        .buttonStyle(.plain)
+                        if store.barAccentIndex == -1 {
+                            ColorPicker("", selection: $store.barAccentColor, supportsOpacity: false).labelsHidden()
+                        }
+                    }
+                }
+                Picker("Size", selection: $store.barSize) {
+                    ForEach(BarSize.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Picker("Font", selection: $store.barFont) {
+                    ForEach(BarFont.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Slider(value: $store.barCornerRadius, in: 0...15) { Text("Corner rounding") }
+            }
+
+            Section("Date and time") {
+                Toggle("Show the date", isOn: $store.barShowDate)
+                Toggle("24-hour clock", isOn: $store.barUse24Hour)
+            }
+
+            Section {
+                LabeledContent("Desktop shortcuts") {
+                    HStack {
+                        Text(store.desktopShortcutsOn ? "On" : "Off").foregroundStyle(.secondary)
+                        Button("Open Keyboard Shortcuts…") { DesktopSwitcher.openShortcutSettings() }
+                    }
+                }
+            } header: {
+                Text("Desktops")
+            } footer: {
+                Text("The desktops match Mission Control, numbered across your screens. Click one to go there. To put an app on a desktop, go to it and open the app, or drag a window onto it in Mission Control. Right-click a desktop to give it a name. Going to an empty desktop needs \"Switch to Desktop\" turned on under Keyboard Shortcuts > Mission Control.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// One item in the top bar's list: whether it shows, which side it's on, and moving it along.
+private struct BarItemRow: View {
+    let item: BarItem
+    let first: Bool
+    let last: Bool
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: item.kind.symbol)
+                .frame(width: 20)
+                .foregroundStyle(item.isOn ? Color.accentColor : .secondary)
+            Toggle(item.kind.title, isOn: Binding(
+                get: { item.isOn },
+                set: { var changed = item; changed.isOn = $0; store.setBarItem(changed) }))
+            Spacer()
+            Picker("", selection: Binding(
+                get: { item.side },
+                set: { var changed = item; changed.side = $0; store.setBarItem(changed) })) {
+                ForEach(BarSide.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 110)
+            // Each side reads left to right, so these move the item along the bar.
+            Button { store.moveBarItem(item, by: -1) } label: { Image(systemName: "chevron.left") }
+                .buttonStyle(.borderless)
+                .disabled(first)
+                .help("Move left")
+            Button { store.moveBarItem(item, by: 1) } label: { Image(systemName: "chevron.right") }
+                .buttonStyle(.borderless)
+                .disabled(last)
+                .help("Move right")
+        }
+    }
+}
+
 private struct BehaviourTab: View {
     @ObservedObject var store: SettingsStore
 
@@ -483,7 +699,7 @@ private struct PermissionsTab: View {
             Section {
                 PermissionRow(
                     title: "Accessibility",
-                    detail: "Notification badges, bringing forward the exact window you click in a preview, closing windows from a preview, and keeping windows out from under the dock.",
+                    detail: "Notification badges, bringing forward the exact window you click in a preview, closing windows from a preview, keeping windows out from under the dock and the top bar, and switching desktops and controlling music from the top bar.",
                     granted: store.hasAccessibility,
                     settingsPage: "Privacy_Accessibility")
                 PermissionRow(

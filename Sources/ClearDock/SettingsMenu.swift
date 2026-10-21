@@ -77,6 +77,10 @@ enum SettingsMenu {
         menu.addItem(sizeItem)
 
         menu.addItem(.separator())
+        menu.addItem(ActionMenuItem("Show the top bar", checked: BarSettings.enabled) {
+            BarSettings.enabled.toggle()
+            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+        })
         menu.addItem(ActionMenuItem("Hide the macOS Dock", checked: Settings.hideSystemDock) {
             Settings.hideSystemDock.toggle()
             if Settings.hideSystemDock { SystemDock.hide() } else { SystemDock.restore() }

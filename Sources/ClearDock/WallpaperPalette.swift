@@ -11,8 +11,14 @@ final class WallpaperPalette {
 
     /// A calm colour from along the bottom of the wallpaper, for backgrounds.
     private(set) var base = NSColor(srgbRed: 0.16, green: 0.18, blue: 0.22, alpha: 1)
+    /// A calm colour from along the top of the wallpaper, for the top bar.
+    private(set) var top = NSColor(srgbRed: 0.10, green: 0.13, blue: 0.20, alpha: 1)
     /// The wallpaper's most colourful tone, for markers and icon tints.
-    private(set) var accent = NSColor(srgbRed: 0.45, green: 0.72, blue: 1, alpha: 1)
+    var accent: NSColor { accents.first ?? Self.fallbackAccent }
+    /// Its strongest colours, most prominent first (up to four), for choosing a highlight.
+    private(set) var accents: [NSColor] = [fallbackAccent]
+
+    private static let fallbackAccent = NSColor(srgbRed: 0.45, green: 0.72, blue: 1, alpha: 1)
 
     private var task: Task<Void, Never>?
 
@@ -22,9 +28,11 @@ final class WallpaperPalette {
         task = Task { @MainActor [weak self] in
             guard let image = await Self.wallpaperImage(for: screen) else { return }
             guard let self, !Task.isCancelled, let colors = Self.colors(in: image) else { return }
-            if colors.base.hexString == self.base.hexString && colors.accent.hexString == self.accent.hexString { return }
+            if colors.base.hexString == self.base.hexString && colors.top.hexString == self.top.hexString
+                && colors.accents.map(\.hexString) == self.accents.map(\.hexString) { return }
             self.base = colors.base
-            self.accent = colors.accent
+            self.top = colors.top
+            self.accents = colors.accents
             NotificationCenter.default.post(name: Self.didChange, object: nil)
         }
     }
@@ -51,7 +59,7 @@ final class WallpaperPalette {
         return picture.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }
 
-    private static func colors(in image: CGImage) -> (base: NSColor, accent: NSColor)? {
+    private static func colors(in image: CGImage) -> (base: NSColor, top: NSColor, accents: [NSColor])? {
         let width = 48, height = max(12, image.height * 48 / max(image.width, 1))
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
@@ -62,7 +70,9 @@ final class WallpaperPalette {
         let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
 
         // Base: the average of the bottom fifth, where the dock sits (rows are stored top first).
+        // Top: the same along the top fifth, where the top bar sits.
         var sum = (r: 0.0, g: 0.0, b: 0.0), count = 0.0
+        var topSum = (r: 0.0, g: 0.0, b: 0.0), topCount = 0.0
         let stripRows = max(1, height / 5)
         // Accent: group pixels by hue, weighting colourful, bright ones, and take the strongest group.
         var bins = Array(repeating: (weight: 0.0, r: 0.0, g: 0.0, b: 0.0), count: 12)
@@ -71,6 +81,7 @@ final class WallpaperPalette {
                 let i = (y * width + x) * 4
                 let r = Double(pixels[i]) / 255, g = Double(pixels[i + 1]) / 255, b = Double(pixels[i + 2]) / 255
                 if y >= height - stripRows { sum.r += r; sum.g += g; sum.b += b; count += 1 }
+                if y < stripRows { topSum.r += r; topSum.g += g; topSum.b += b; topCount += 1 }
                 let color = NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
                 let s = Double(color.saturationComponent), v = Double(color.brightnessComponent)
                 let weight = s * s * v
@@ -80,16 +91,18 @@ final class WallpaperPalette {
                 bins[bin].r += r * weight; bins[bin].g += g * weight; bins[bin].b += b * weight
             }
         }
-        guard count > 0 else { return nil }
+        guard count > 0, topCount > 0 else { return nil }
         let base = NSColor(srgbRed: sum.r / count, green: sum.g / count, blue: sum.b / count, alpha: 1)
+        let top = NSColor(srgbRed: topSum.r / topCount, green: topSum.g / topCount, blue: topSum.b / topCount, alpha: 1)
 
-        var accent = NSColor(srgbRed: 0.45, green: 0.72, blue: 1, alpha: 1)
-        if let best = bins.max(by: { $0.weight < $1.weight }), best.weight > 0 {
-            let raw = NSColor(srgbRed: best.r / best.weight, green: best.g / best.weight, blue: best.b / best.weight, alpha: 1)
-            // Make sure the accent reads clearly as a colour against the desktop.
-            accent = NSColor(hue: raw.hueComponent, saturation: max(raw.saturationComponent, 0.5),
-                             brightness: max(raw.brightnessComponent, 0.85), alpha: 1)
+        // The strongest hue groups, each made to read clearly as a colour against the desktop.
+        var accents: [NSColor] = []
+        for group in bins.sorted(by: { $0.weight > $1.weight }) where group.weight > 0 && accents.count < 4 {
+            let raw = NSColor(srgbRed: group.r / group.weight, green: group.g / group.weight, blue: group.b / group.weight, alpha: 1)
+            let color = NSColor(hue: raw.hueComponent, saturation: max(raw.saturationComponent, 0.5),
+                                brightness: max(raw.brightnessComponent, 0.85), alpha: 1)
+            if !accents.contains(where: { $0.hexString == color.hexString }) { accents.append(color) }
         }
-        return (base, accent)
+        return (base, top, accents.isEmpty ? [fallbackAccent] : accents)
     }
 }

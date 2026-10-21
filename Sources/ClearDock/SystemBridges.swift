@@ -101,6 +101,28 @@ enum WindowSpaces {
         let spaces = copySpaces(connection, 0x7, [NSNumber(value: windowID)] as CFArray)?.takeRetainedValue() as? [NSNumber]
         return !(spaces ?? []).isEmpty
     }
+
+    /// The desktops a window is placed on, by the window server's ids for them. Empty for a
+    /// window that isn't placed anywhere (minimized, in a hidden app, or a ghost).
+    static func spaceIDs(of windowID: CGWindowID) -> [UInt64] {
+        guard let connection, let isOrderedIn, let copySpaces else { return [] }
+        var orderedIn = false
+        _ = isOrderedIn(connection, windowID, &orderedIn)
+        guard orderedIn else { return [] }
+        let spaces = copySpaces(connection, 0x7, [NSNumber(value: windowID)] as CFArray)?.takeRetainedValue() as? [NSNumber]
+        return (spaces ?? []).map(\.uint64Value)
+    }
+
+    private typealias CopyDisplaySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
+    private static let copyDisplaySpaces: CopyDisplaySpaces? = dlsym(anywhere, "CGSCopyManagedDisplaySpaces")
+        .map { unsafeBitCast($0, to: CopyDisplaySpaces.self) }
+
+    /// Every display's desktops, as Mission Control has them: one entry per display (or a single
+    /// "Main" entry when displays share desktops), with its "Spaces" and its "Current Space".
+    static func displaySpaces() -> [[String: Any]] {
+        guard let connection, let copyDisplaySpaces else { return [] }
+        return copyDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]] ?? []
+    }
 }
 
 /// The app's own list of its windows, through Accessibility. It includes minimized windows,

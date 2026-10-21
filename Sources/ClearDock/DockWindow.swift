@@ -75,7 +75,7 @@ final class DockController {
     private let view: DockView
     private let container: DockContainerView
     private let previews = WindowPreviewController()
-    private let spaceKeeper = DockSpaceKeeper()
+    private let spaceKeeper = DockSpaceKeeper.shared
     /// True while the app in front is in full screen; the dock then tucks away like the macOS Dock.
     private var fullScreenFront = false
     /// Kept on screen while the settings window is open, so changes can be seen as they happen.

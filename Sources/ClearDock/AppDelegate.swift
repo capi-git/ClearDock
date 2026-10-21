@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var controller: DockController?
+    private var topBar: TopBarController?
     private var statusItem: NSStatusItem?
     private var poweringOff = false
     private var terminationSignal: DispatchSourceSignal?
@@ -11,7 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.seedFromSystemDock()
         if Settings.hideSystemDock { SystemDock.hide() }
         controller = DockController()
-        SettingsWindowController.shared.onChange = { [weak self] in self?.controller?.settingsChanged() }
+        topBar = TopBarController()
+        SettingsWindowController.shared.onChange = { [weak self] in
+            self?.controller?.settingsChanged()
+            self?.topBar?.settingsChanged()
+        }
         SettingsWindowController.shared.onOpenChanged = { [weak self] open in self?.controller?.keepVisible = open }
         NSApp.mainMenu = Self.makeMainMenu()
         askForPermissionsOnce()

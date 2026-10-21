@@ -2,20 +2,31 @@ import AppKit
 import ApplicationServices
 
 /// Keeps windows from going under Clear Dock while it stays on screen, the way the macOS Dock
-/// does when it isn't hidden. A window that ends up reaching into the dock's strip (after Fill,
-/// maximise, tiling, or when it opens) is shortened to stop just above the dock.
+/// does when it isn't hidden, and out from under the top bar. A window that ends up reaching into
+/// one of those strips (after Fill, maximise, tiling, or when it opens) is shortened to stop at it.
 ///
 /// Works through Accessibility, and only looks at a window after it has moved or changed size,
 /// once the mouse button is up, so it never fights a resize you're in the middle of.
 @MainActor
 final class DockSpaceKeeper {
-    /// The inner edge of the space kept free, in the system's window coordinates (measured from
-    /// the top-left of the main screen): a y position for a bottom dock, an x position for a side
-    /// dock. Nil when nothing is reserved.
-    private var reservedLine: CGFloat?
-    private var edge = DockEdge.bottom
-    /// The screen the dock is on, in the same top-down coordinates.
-    private var screenRect: CGRect = .zero
+    /// Shared by the dock and the top bar, so each window is only watched once.
+    static let shared = DockSpaceKeeper()
+
+    private enum Edge { case top, bottom, left, right }
+
+    /// A strip along one edge of a screen to keep windows out of. `line` is the strip's inner edge
+    /// and `screen` the screen, both in the system's window coordinates (measured from the top-left
+    /// of the main screen, growing downwards).
+    private struct Strip: Equatable {
+        let edge: Edge
+        let line: CGFloat
+        let screen: CGRect
+    }
+
+    /// The strips each part of Clear Dock has asked for ("dock" and "bar").
+    private var slots: [String: [Strip]] = [:]
+    /// Top strips first, so a window is moved down before its bottom is trimmed.
+    private var strips: [Strip] { slots.values.flatMap { $0 }.sorted { $0.edge == .top && $1.edge != .top } }
 
     private var observers: [pid_t: AXObserver] = [:]
     private var watchedWindows = Set<CFHashCode>()
@@ -30,18 +41,36 @@ final class DockSpaceKeeper {
     /// dock's inner edge in the usual bottom-up screen coordinates (a y for a bottom dock, an x
     /// for a side dock). Pass nil to stop.
     func reserve(edge: DockEdge, line: CGFloat?, on screen: NSScreen?) {
-        guard let line, let screen, AXIsProcessTrusted() else { return stop() }
-        // The system's window coordinates start at the top-left of the main screen and grow downwards.
-        let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
-        let converted = edge == .bottom ? mainHeight - line : line
-        let rect = CGRect(x: screen.frame.minX, y: mainHeight - screen.frame.maxY,
-                          width: screen.frame.width, height: screen.frame.height)
-        let changed = converted != reservedLine || rect != screenRect || edge != self.edge
-        reservedLine = converted
-        self.edge = edge
-        screenRect = rect
-        if observers.isEmpty { start() }
-        if changed { fitAllWindows() }
+        guard let line, let screen else { return set("dock", []) }
+        let converted = edge == .bottom ? Self.mainHeight - line : line
+        let kept: Edge = switch edge {
+        case .bottom: .bottom
+        case .left: .left
+        case .right: .right
+        }
+        set("dock", [Strip(edge: kept, line: converted, screen: Self.topDown(screen))])
+    }
+
+    /// Keep the top of each screen, down to `bottom` (a y in the usual bottom-up screen
+    /// coordinates), free of windows. Pass an empty list to stop.
+    func reserveTop(_ bars: [(bottom: CGFloat, screen: NSScreen)]) {
+        set("bar", bars.map { Strip(edge: .top, line: Self.mainHeight - $0.bottom, screen: Self.topDown($0.screen)) })
+    }
+
+    private func set(_ slot: String, _ new: [Strip]) {
+        let changed = (slots[slot] ?? []) != new
+        slots[slot] = new.isEmpty ? nil : new
+        guard !slots.isEmpty, AXIsProcessTrusted() else { return stopWatching() }
+        let wasIdle = observers.isEmpty
+        if wasIdle { start() }
+        if changed || wasIdle { fitAllWindows() }
+    }
+
+    /// The system's window coordinates start at the top-left of the main screen and grow downwards.
+    private static var mainHeight: CGFloat { NSScreen.screens.first?.frame.height ?? 0 }
+
+    private static func topDown(_ screen: NSScreen) -> CGRect {
+        CGRect(x: screen.frame.minX, y: mainHeight - screen.frame.maxY, width: screen.frame.width, height: screen.frame.height)
     }
 
     private func start() {
@@ -62,8 +91,7 @@ final class DockSpaceKeeper {
         ]
     }
 
-    private func stop() {
-        reservedLine = nil
+    private func stopWatching() {
         for (_, observer) in observers {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         }
@@ -114,7 +142,7 @@ final class DockSpaceKeeper {
     }
 
     private func windowChanged(_ element: AXUIElement) {
-        guard reservedLine != nil else { return }
+        guard !slots.isEmpty else { return }
         // The notification may name the app rather than a window; then check its focused window.
         let window: AXUIElement
         if role(of: element) == kAXWindowRole {
@@ -166,30 +194,45 @@ final class DockSpaceKeeper {
             let ms = Int((CACurrentMediaTime() - started) * 1000)
             if ms > 30 { previewLog.notice("Timing: checking a window took \(ms) ms") }
         }
-        guard let line = reservedLine else { return }
+        let strips = strips
+        guard !strips.isEmpty else { return }
         AXUIElementSetMessagingTimeout(window, 0.35)
         // Full-screen windows have their own desktop and can't be resized.
         if (attribute(window, "AXFullScreen") as? Bool) == true { return }
         if (attribute(window, kAXMinimizedAttribute) as? Bool) == true { return }
         guard let origin = point(window, kAXPositionAttribute), let size = size(window, kAXSizeAttribute) else { return }
-        let frame = CGRect(origin: origin, size: size)
+        let original = CGRect(origin: origin, size: size)
+        var frame = original
 
-        // Only windows mostly on the dock's screen, reaching into the dock's strip, ending on the
+        // Only windows mostly on the strip's screen, reaching into the strip, ending on the
         // screen (not dragged half off it), and still able to stay a sensible size.
-        guard frame.intersects(screenRect), screenRect.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return }
-        switch edge {
-        case .bottom:
-            guard frame.maxY > line + 1, frame.maxY <= screenRect.maxY + 2, frame.minY < line - 150 else { return }
-            setSize(window, CGSize(width: size.width, height: (line - frame.minY).rounded(.down)))
-        case .left:
-            // Move the window's left side out from under the dock, keeping its right side where it is.
-            guard frame.minX < line - 1, frame.minX >= screenRect.minX - 2, frame.maxX > line + 250 else { return }
-            setPosition(window, CGPoint(x: line.rounded(.up), y: frame.minY))
-            setSize(window, CGSize(width: (frame.maxX - line).rounded(.down), height: size.height))
-        case .right:
-            guard frame.maxX > line + 1, frame.maxX <= screenRect.maxX + 2, frame.minX < line - 250 else { return }
-            setSize(window, CGSize(width: (line - frame.minX).rounded(.down), height: size.height))
+        for strip in strips {
+            let screenRect = strip.screen, line = strip.line
+            guard frame.intersects(screenRect), screenRect.contains(CGPoint(x: frame.midX, y: frame.midY)) else { continue }
+            switch strip.edge {
+            case .top:
+                // Move the window's top down out from under the bar, keeping its bottom where it is.
+                guard frame.minY < line - 1, frame.minY >= screenRect.minY - 2, frame.maxY > line + 150 else { continue }
+                let bottom = frame.maxY
+                frame.origin.y = line.rounded(.up)
+                frame.size.height = (bottom - frame.origin.y).rounded(.down)
+            case .bottom:
+                guard frame.maxY > line + 1, frame.maxY <= screenRect.maxY + 2, frame.minY < line - 150 else { continue }
+                frame.size.height = (line - frame.minY).rounded(.down)
+            case .left:
+                // Move the window's left side out from under the dock, keeping its right side where it is.
+                guard frame.minX < line - 1, frame.minX >= screenRect.minX - 2, frame.maxX > line + 250 else { continue }
+                let right = frame.maxX
+                frame.origin.x = line.rounded(.up)
+                frame.size.width = (right - frame.origin.x).rounded(.down)
+            case .right:
+                guard frame.maxX > line + 1, frame.maxX <= screenRect.maxX + 2, frame.minX < line - 250 else { continue }
+                frame.size.width = (line - frame.minX).rounded(.down)
+            }
         }
+        // Shrink first, then move, so the window never has to reach past the screen on the way.
+        if frame.size != original.size { setSize(window, frame.size) }
+        if frame.origin != original.origin { setPosition(window, frame.origin) }
     }
 
     private func setSize(_ window: AXUIElement, _ size: CGSize) {

@@ -1,0 +1,200 @@
+import AppKit
+
+/// One thing the top bar can show.
+enum BarItemKind: String, CaseIterable, Identifiable {
+    case desktops, app, song, volume, battery, clock
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .desktops: "Desktops"
+        case .app: "App in front"
+        case .song: "Song playing"
+        case .volume: "Volume"
+        case .battery: "Battery"
+        case .clock: "Date and time"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .desktops: "square.split.2x2"
+        case .app: "macwindow"
+        case .song: "music.note"
+        case .volume: "speaker.wave.2.fill"
+        case .battery: "battery.75percent"
+        case .clock: "clock"
+        }
+    }
+}
+
+enum BarSide: String, CaseIterable, Identifiable {
+    case left, right
+    var id: String { rawValue }
+    var title: String { self == .left ? "Left" : "Right" }
+}
+
+/// An item, which side of the bar it's on, and whether it's showing.
+struct BarItem: Identifiable, Equatable {
+    var kind: BarItemKind
+    var side: BarSide
+    var isOn: Bool
+    var id: String { kind.rawValue }
+}
+
+/// What's behind each piece of the bar.
+enum BarStyle: String, CaseIterable, Identifiable {
+    case wallpaper, glass, color, none
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .wallpaper: "Wallpaper"
+        case .glass: "Glass"
+        case .color: "Colour"
+        case .none: "None"
+        }
+    }
+}
+
+enum BarSize: String, CaseIterable, Identifiable {
+    case small, medium, large
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var pillHeight: CGFloat { switch self { case .small: 22; case .medium: 26; case .large: 30 } }
+    var fontSize: CGFloat { switch self { case .small: 11.5; case .medium: 13; case .large: 14.5 } }
+    var iconSize: CGFloat { switch self { case .small: 14; case .medium: 17; case .large: 20 } }
+}
+
+enum BarFont: String, CaseIterable, Identifiable {
+    case rounded, standard, mono
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .rounded: "Rounded"
+        case .standard: "Standard"
+        case .mono: "Monospaced"
+        }
+    }
+}
+
+/// The top bar's settings, stored in Clear Dock's preferences under "bar." keys.
+enum BarSettings {
+    private static var defaults: UserDefaults { .standard }
+
+    /// The top bar is off until it's switched on.
+    static var enabled: Bool {
+        get { defaults.bool(forKey: "bar.enabled") }
+        set { defaults.set(newValue, forKey: "bar.enabled") }
+    }
+
+    static var allScreens: Bool {
+        get { defaults.object(forKey: "bar.allScreens") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "bar.allScreens") }
+    }
+
+    static let defaultItems: [BarItem] = [
+        BarItem(kind: .desktops, side: .left, isOn: true),
+        BarItem(kind: .app, side: .left, isOn: true),
+        BarItem(kind: .song, side: .right, isOn: true),
+        BarItem(kind: .volume, side: .right, isOn: true),
+        BarItem(kind: .battery, side: .right, isOn: true),
+        BarItem(kind: .clock, side: .right, isOn: true),
+    ]
+
+    /// The items in order, each saved as "kind:side:on". Items added in later versions are put at the end.
+    static var items: [BarItem] {
+        get {
+            let saved = (defaults.stringArray(forKey: "bar.items") ?? []).compactMap { entry -> BarItem? in
+                let parts = entry.split(separator: ":").map(String.init)
+                guard parts.count == 3, let kind = BarItemKind(rawValue: parts[0]),
+                      let side = BarSide(rawValue: parts[1]) else { return nil }
+                return BarItem(kind: kind, side: side, isOn: parts[2] == "1")
+            }
+            let missing = defaultItems.filter { item in !saved.contains { $0.kind == item.kind } }
+            return saved + missing
+        }
+        set { defaults.set(newValue.map { "\($0.kind.rawValue):\($0.side.rawValue):\($0.isOn ? 1 : 0)" }, forKey: "bar.items") }
+    }
+
+    static var style: BarStyle {
+        get { defaults.string(forKey: "bar.style").flatMap(BarStyle.init(rawValue:)) ?? .wallpaper }
+        set { defaults.set(newValue.rawValue, forKey: "bar.style") }
+    }
+
+    static var color: NSColor {
+        get { defaults.string(forKey: "bar.color").flatMap(NSColor.init(hex:)) ?? NSColor(srgbRed: 0.06, green: 0.09, blue: 0.15, alpha: 1) }
+        set { defaults.set(newValue.hexString, forKey: "bar.color") }
+    }
+
+    static var opacity: Double {
+        get { defaults.object(forKey: "bar.opacity") == nil ? 0.62 : defaults.double(forKey: "bar.opacity") }
+        set { defaults.set(newValue, forKey: "bar.opacity") }
+    }
+
+    /// Which of the wallpaper's colours highlights the current desktop and the icons:
+    /// 0 is its strongest colour, and -1 means the colour chosen below.
+    static var accentIndex: Int {
+        get { defaults.object(forKey: "bar.accentIndex") == nil ? 0 : defaults.integer(forKey: "bar.accentIndex") }
+        set { defaults.set(newValue, forKey: "bar.accentIndex") }
+    }
+
+    static var accentColor: NSColor {
+        get { defaults.string(forKey: "bar.accentColor").flatMap(NSColor.init(hex:)) ?? NSColor(srgbRed: 0.48, green: 0.64, blue: 1, alpha: 1) }
+        set { defaults.set(newValue.hexString, forKey: "bar.accentColor") }
+    }
+
+    static var size: BarSize {
+        get { defaults.string(forKey: "bar.size").flatMap(BarSize.init(rawValue:)) ?? .medium }
+        set { defaults.set(newValue.rawValue, forKey: "bar.size") }
+    }
+
+    static var font: BarFont {
+        get { defaults.string(forKey: "bar.font").flatMap(BarFont.init(rawValue:)) ?? .rounded }
+        set { defaults.set(newValue.rawValue, forKey: "bar.font") }
+    }
+
+    static var cornerRadius: Double {
+        get { defaults.object(forKey: "bar.cornerRadius") == nil ? 9 : defaults.double(forKey: "bar.cornerRadius") }
+        set { defaults.set(newValue, forKey: "bar.cornerRadius") }
+    }
+
+    static var showDate: Bool {
+        get { defaults.object(forKey: "bar.showDate") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "bar.showDate") }
+    }
+
+    static var use24Hour: Bool {
+        get { defaults.bool(forKey: "bar.use24Hour") }
+        set { defaults.set(newValue, forKey: "bar.use24Hour") }
+    }
+
+    /// Names you've given desktops, by the desktop's id.
+    static var desktopNames: [String: String] {
+        get { defaults.dictionary(forKey: "bar.desktopNames") as? [String: String] ?? [:] }
+        set { defaults.set(newValue, forKey: "bar.desktopNames") }
+    }
+
+    /// Whether the bar needs colours taken from the wallpaper.
+    static var usesWallpaper: Bool { enabled && (style == .wallpaper || accentIndex >= 0) }
+
+    /// Whether "Automatically hide and show the menu bar" is set to Always, so the top bar
+    /// takes the macOS menu bar's place instead of sitting under it.
+    @MainActor static var macMenuBarHidden: Bool {
+        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
+        if (CFPreferencesCopyAppValue("_HIHideMenuBar" as CFString, kCFPreferencesAnyApplication) as? NSNumber)?.boolValue == true {
+            return true
+        }
+        // In case macOS keeps the setting somewhere else: a screen without a notch that keeps no
+        // room for the menu bar along its top means the menu bar is hiding itself.
+        return NSScreen.screens.contains { $0.safeAreaInsets.top == 0 && $0.frame.maxY - $0.visibleFrame.maxY < 1 }
+    }
+
+    /// Opens the System Settings page with "Automatically hide and show the menu bar".
+    static func openMenuBarSettings() {
+        for page in ["x-apple.systempreferences:com.apple.ControlCenter-Settings.extension",
+                     "x-apple.systempreferences:com.apple.preference.dock"] {
+            if let url = URL(string: page), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
+    /// Posted when a bar setting changes outside the settings window (for example from a menu).
+    static let didChange = Notification.Name("ClearDockBarSettingsChanged")
+}
