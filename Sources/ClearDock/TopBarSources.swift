@@ -18,6 +18,9 @@ struct Desktop: Identifiable, Equatable {
     /// Stays the same across restarts, so a name you give it sticks.
     let key: String
     let isCurrent: Bool
+    /// How many places it is to the right of the desktop showing on its display (negative for
+    /// left), counting full-screen apps, which sit between desktops. Nil when that's unknown.
+    let stepsFromCurrent: Int?
     /// Apps with windows on it, front-most first.
     let apps: [pid_t]
     /// Its front-most window, which can be brought forward to go there.
@@ -56,8 +59,10 @@ enum DesktopReader {
         for display in displays {
             let displayID = display["Display Identifier"] as? String ?? "Main"
             let current = Self.id(display["Current Space"] as? [String: Any])
+            let spaces = (display["Spaces"] as? [[String: Any]]) ?? []
+            let currentPlace = spaces.firstIndex { Self.id($0) == current }
             var desktops: [Desktop] = []
-            for (index, space) in ((display["Spaces"] as? [[String: Any]]) ?? []).enumerated() {
+            for (index, space) in spaces.enumerated() {
                 // Type 0 is an ordinary desktop; full-screen apps have their own type.
                 guard (space["type"] as? Int ?? 0) == 0, let id = Self.id(space) else { continue }
                 number += 1
@@ -66,7 +71,7 @@ enum DesktopReader {
                 for window in windows where !apps.contains(window.app) { apps.append(window.app) }
                 let uuid = space["uuid"] as? String ?? ""
                 desktops.append(Desktop(id: id, number: number, key: uuid.isEmpty ? "\(displayID)#\(index)" : uuid,
-                                        isCurrent: id == current, apps: apps,
+                                        isCurrent: id == current, stepsFromCurrent: currentPlace.map { index - $0 }, apps: apps,
                                         frontWindow: windows.first?.window, frontApp: windows.first?.app))
             }
             result[displayID] = desktops
@@ -81,37 +86,69 @@ enum DesktopReader {
 }
 
 /// Goes to a desktop. macOS has no way for apps to do this directly, so it presses macOS's own
-/// "Switch to Desktop" shortcut when that's turned on, or else brings forward a window that's on
-/// that desktop (which takes you there).
+/// keyboard shortcuts: "Switch to Desktop" when that's turned on, or otherwise "Move left a space"
+/// or "Move right a space" (on unless you've turned them off) as many times as it takes. These act
+/// on the display under the pointer, which is the one whose bar you clicked.
 @MainActor
 enum DesktopSwitcher {
-    /// The "Switch to Desktop N" shortcut, if it's turned on in Keyboard Shortcuts > Mission Control.
-    static func shortcut(for number: Int) -> (key: CGKeyCode, flags: CGEventFlags)? {
-        guard (1...16).contains(number) else { return nil }
+    private typealias Shortcut = (key: CGKeyCode, flags: CGEventFlags)
+
+    /// The shortcut with this hot key number, if it's on. `standard` is its usual keys, used when
+    /// it has never been changed.
+    private static func hotKey(_ id: Int, standard: Shortcut? = nil) -> Shortcut? {
         let domain = "com.apple.symbolichotkeys" as CFString
         CFPreferencesAppSynchronize(domain)
-        // Desktops 1 to 16 are hot keys 118 to 133.
-        guard let all = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString, domain) as? [String: Any],
-              let entry = all[String(117 + number)] as? [String: Any],
-              (entry["enabled"] as? NSNumber)?.boolValue == true,
-              let value = entry["value"] as? [String: Any],
-              let parameters = value["parameters"] as? [NSNumber], parameters.count >= 3
-        else { return nil }
+        let all = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString, domain) as? [String: Any]
+        guard let entry = all?[String(id)] as? [String: Any] else { return standard }
+        guard (entry["enabled"] as? NSNumber)?.boolValue == true else { return nil }
+        guard let value = entry["value"] as? [String: Any],
+              let parameters = value["parameters"] as? [NSNumber], parameters.count >= 3 else { return standard }
         return (CGKeyCode(parameters[1].intValue), CGEventFlags(rawValue: UInt64(parameters[2].intValue)))
     }
 
-    static var shortcutsOn: Bool { shortcut(for: 1) != nil }
+    /// "Move left a space" (hot key 79) or "Move right a space" (81): Control and an arrow key.
+    private static func moveShortcut(right: Bool) -> Shortcut? {
+        let arrow: CGKeyCode = right ? 124 : 123
+        guard let shortcut = hotKey(right ? 81 : 79, standard: (arrow, [.maskControl, .maskSecondaryFn])) else { return nil }
+        // Arrow keys always carry these flags when pressed on a keyboard.
+        return (shortcut.key, shortcut.flags.union([.maskSecondaryFn, .maskNumericPad]))
+    }
+
+    private static func press(_ shortcut: Shortcut) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: shortcut.key, keyDown: down)
+            event?.flags = shortcut.flags
+            event?.post(tap: .cghidEventTap)
+        }
+    }
+
+    /// The "Switch to Desktop N" shortcut, if it's turned on in Keyboard Shortcuts > Mission Control.
+    /// They're off unless you turn them on. Desktops 1 to 16 are hot keys 118 to 133.
+    private static func shortcut(for number: Int) -> Shortcut? {
+        guard (1...16).contains(number) else { return nil }
+        return hotKey(117 + number)
+    }
+
+    /// Whether the bar can switch desktops at all.
+    static var canSwitch: Bool { shortcut(for: 1) != nil || moveShortcut(right: true) != nil }
 
     static func go(to desktop: Desktop) {
         guard !desktop.isCurrent else { return }
-        if let shortcut = shortcut(for: desktop.number), AXIsProcessTrusted() {
-            let source = CGEventSource(stateID: .hidSystemState)
-            for down in [true, false] {
-                let event = CGEvent(keyboardEventSource: source, virtualKey: shortcut.key, keyDown: down)
-                event?.flags = shortcut.flags
-                event?.post(tap: .cghidEventTap)
+        if AXIsProcessTrusted() {
+            if let shortcut = shortcut(for: desktop.number) {
+                press(shortcut)
+                return
             }
-            return
+            if let steps = desktop.stepsFromCurrent, steps != 0, let move = moveShortcut(right: steps > 0) {
+                // A short pause between presses lets macOS take each one.
+                for step in 0..<abs(steps) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06 * Double(step)) {
+                        MainActor.assumeIsolated { press(move) }
+                    }
+                }
+                return
+            }
         }
         if let window = desktop.frontWindow, let app = desktop.frontApp {
             WindowFocus.raise(window, of: app)
@@ -138,11 +175,12 @@ enum DesktopSwitcher {
     private static func explainShortcuts() {
         let previous = NSWorkspace.shared.frontmostApplication
         let alert = NSAlert()
-        alert.messageText = "Turn on the desktop shortcuts to jump to an empty desktop"
+        alert.messageText = "Turn on the desktop shortcuts to switch desktops from the bar"
         alert.informativeText = """
-            macOS only lets other apps switch desktops through its own keyboard shortcuts. In System Settings, \
-            open Keyboard > Keyboard Shortcuts > Mission Control and turn on "Switch to Desktop 1", \
-            "Switch to Desktop 2" and so on. Desktops with windows on them work without this.
+            macOS only lets other apps switch desktops through its own keyboard shortcuts, and they're \
+            turned off. In System Settings, open Keyboard > Keyboard Shortcuts > Mission Control and turn on \
+            "Move left a space" and "Move right a space", or "Switch to Desktop 1", "Switch to Desktop 2" \
+            and so on.
             """
         alert.addButton(withTitle: "Open Keyboard Settings")
         alert.addButton(withTitle: "Not Now")

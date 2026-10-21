@@ -63,6 +63,20 @@ enum BarSize: String, CaseIterable, Identifiable {
     var iconSize: CGFloat { switch self { case .small: 14; case .medium: 17; case .large: 20 } }
 }
 
+/// How the desktops are drawn.
+enum DesktopStyle: String, CaseIterable, Identifiable {
+    case separate, joined, numbers, apps
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .separate: "Separate"
+        case .joined: "Joined"
+        case .numbers: "Numbers"
+        case .apps: "Apps"
+        }
+    }
+}
+
 enum BarFont: String, CaseIterable, Identifiable {
     case rounded, standard, mono
     var id: String { rawValue }
@@ -166,6 +180,17 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "bar.use24Hour") }
     }
 
+    static var desktopStyle: DesktopStyle {
+        get { defaults.string(forKey: "bar.desktopStyle").flatMap(DesktopStyle.init(rawValue:)) ?? .separate }
+        set { defaults.set(newValue.rawValue, forKey: "bar.desktopStyle") }
+    }
+
+    /// Number each screen's desktops from 1, instead of counting across all screens as Mission Control does.
+    static var numberPerScreen: Bool {
+        get { defaults.bool(forKey: "bar.numberPerScreen") }
+        set { defaults.set(newValue, forKey: "bar.numberPerScreen") }
+    }
+
     /// Names you've given desktops, by the desktop's id.
     static var desktopNames: [String: String] {
         get { defaults.dictionary(forKey: "bar.desktopNames") as? [String: String] ?? [:] }
@@ -182,8 +207,15 @@ enum BarSettings {
     /// Whether the bar needs colours taken from the wallpaper.
     static var usesWallpaper: Bool { enabled && (style == .wallpaper || accentIndex >= 0) }
 
-    /// Whether "Automatically hide and show the menu bar" is set to Always, so the top bar
-    /// takes the macOS menu bar's place instead of sitting under it.
+    /// Whether the top bar goes along the very top of the screen, in the macOS menu bar's place,
+    /// rather than under it: when Clear Dock has hidden the menu bar for it, or the menu bar
+    /// hides itself anyway. Clear Dock knows straight away when it has hidden the menu bar,
+    /// without waiting for macOS to finish sliding it away.
+    @MainActor static var takesMenuBarsPlace: Bool {
+        (enabled && replaceMenuBar && SystemMenuBar.isHiddenByClearDock) || macMenuBarHidden
+    }
+
+    /// Whether "Automatically hide and show the menu bar" is set to Always.
     @MainActor static var macMenuBarHidden: Bool {
         CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
         if (CFPreferencesCopyAppValue("_HIHideMenuBar" as CFString, kCFPreferencesAnyApplication) as? NSNumber)?.boolValue == true {

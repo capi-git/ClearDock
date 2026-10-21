@@ -160,6 +160,8 @@ final class SettingsStore: ObservableObject {
     @Published var barCornerRadius = 9.0 { didSet { edit(keepsTheme: true) { BarSettings.cornerRadius = barCornerRadius } } }
     @Published var barShowDate = true { didSet { edit(keepsTheme: true) { BarSettings.showDate = barShowDate } } }
     @Published var barUse24Hour = false { didSet { edit(keepsTheme: true) { BarSettings.use24Hour = barUse24Hour } } }
+    @Published var desktopStyle = DesktopStyle.separate { didSet { edit(keepsTheme: true) { BarSettings.desktopStyle = desktopStyle } } }
+    @Published var numberPerScreen = false { didSet { edit(keepsTheme: true) { BarSettings.numberPerScreen = numberPerScreen } } }
     @Published var menuBarHidden = false
     @Published var desktopShortcutsOn = false
     @Published var wallpaperAccents: [Color] = []
@@ -262,6 +264,8 @@ final class SettingsStore: ObservableObject {
         barCornerRadius = BarSettings.cornerRadius
         barShowDate = BarSettings.showDate
         barUse24Hour = BarSettings.use24Hour
+        desktopStyle = BarSettings.desktopStyle
+        numberPerScreen = BarSettings.numberPerScreen
         loadCustomIcons()
         refreshStatus()
         loading = false
@@ -276,7 +280,7 @@ final class SettingsStore: ObservableObject {
         wallpaperAccents = WallpaperPalette.shared.accents.map { Color(nsColor: $0) }
         menuBarHidden = BarSettings.macMenuBarHidden
         menuBarRefused = SystemMenuBar.refused
-        desktopShortcutsOn = DesktopSwitcher.shortcutsOn
+        desktopShortcutsOn = DesktopSwitcher.canSwitch
     }
 
     func apply(_ theme: DockTheme) {
@@ -620,16 +624,23 @@ private struct TopBarTab: View {
             }
 
             Section {
-                LabeledContent("Desktop shortcuts") {
+                Picker("Show desktops as", selection: $store.desktopStyle) {
+                    ForEach(DesktopStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Number each screen's desktops from 1", isOn: $store.numberPerScreen)
+                LabeledContent("Switching desktops") {
                     HStack {
-                        Text(store.desktopShortcutsOn ? "On" : "Off").foregroundStyle(.secondary)
-                        Button("Open Keyboard Shortcuts…") { DesktopSwitcher.openShortcutSettings() }
+                        Text(store.desktopShortcutsOn ? "Ready" : "Needs the Mission Control shortcuts").foregroundStyle(.secondary)
+                        if !store.desktopShortcutsOn {
+                            Button("Open Keyboard Shortcuts…") { DesktopSwitcher.openShortcutSettings() }
+                        }
                     }
                 }
             } header: {
                 Text("Desktops")
             } footer: {
-                Text("The desktops match Mission Control, numbered across your screens. Click one to go there. To put an app on a desktop, go to it and open the app, or drag a window onto it in Mission Control. Right-click a desktop to give it a name. Going to an empty desktop needs \"Switch to Desktop\" turned on under Keyboard Shortcuts > Mission Control.")
+                Text("The desktops match Mission Control, numbered across your screens. Click one to go there. To put an app on a desktop, go to it and open the app, or drag a window onto it in Mission Control. Right-click a desktop to give it a name. The bar switches desktops with macOS's own Mission Control shortcuts, \"Move left a space\" and \"Move right a space\", which are on unless you've turned them off.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

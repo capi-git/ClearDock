@@ -55,31 +55,93 @@ private struct DesktopPills: View {
 
     var body: some View {
         let look = model.look
-        HStack(spacing: 6) {
-            ForEach(model.desktops[key] ?? []) { desktop in
-                let name = model.desktopNames[desktop.key]
-                Pill(look: look, highlighted: desktop.isCurrent, action: { DesktopSwitcher.go(to: desktop) }) {
-                    Text(name ?? "\(desktop.number)").font(look.font(.bold))
-                    if desktop.apps.isEmpty {
-                        if name == nil { Text("–").opacity(0.45) }
-                    } else {
-                        ForEach(desktop.apps.prefix(4), id: \.self) { pid in
-                            if let icon = model.icon(for: pid) {
-                                Image(nsImage: icon).resizable().frame(width: look.size.iconSize, height: look.size.iconSize)
-                            }
-                        }
-                        if desktop.apps.count > 4 { Text("+\(desktop.apps.count - 4)").opacity(0.7) }
+        let desktops = model.desktops[key] ?? []
+        switch look.desktopStyle {
+        case .separate:
+            // A piece for each desktop, with the apps on it.
+            HStack(spacing: 6) {
+                ForEach(Array(desktops.enumerated()), id: \.element.id) { index, desktop in
+                    Pill(look: look, highlighted: desktop.isCurrent, action: { DesktopSwitcher.go(to: desktop) }) {
+                        label(desktop, index: index)
+                        apps(desktop)
                     }
-                }
-                .contextMenu {
-                    Button("Name Desktop \(desktop.number)…") { model.rename(desktop) }
-                    if name != nil { Button("Show the Number Instead") { model.forget(desktop) } }
-                    Divider()
-                    Button("Hide Desktops") { model.hide(.desktops) }
-                    BarSettingsButton()
+                    .contextMenu { menu(desktop) }
                 }
             }
+        case .joined, .numbers, .apps:
+            // One piece with a part for each desktop; the current one is highlighted.
+            Pill(look: look) {
+                HStack(spacing: 2) {
+                    ForEach(Array(desktops.enumerated()), id: \.element.id) { index, desktop in
+                        Segment(look: look, highlighted: desktop.isCurrent, dimmed: desktop.apps.isEmpty && look.desktopStyle == .numbers) {
+                            if look.desktopStyle != .apps || desktop.apps.isEmpty { label(desktop, index: index) }
+                            if look.desktopStyle != .numbers { apps(desktop, showEmpty: false) }
+                        }
+                        .onTapGesture { DesktopSwitcher.go(to: desktop) }
+                        .contextMenu { menu(desktop) }
+                    }
+                }
+                // The segments reach the edges of the piece.
+                .padding(.horizontal, -(look.size.pillHeight * 0.4).rounded() + 3)
+            }
         }
+    }
+
+    private func number(_ desktop: Desktop, index: Int) -> Int {
+        model.look.numberPerScreen ? index + 1 : desktop.number
+    }
+
+    @ViewBuilder private func label(_ desktop: Desktop, index: Int) -> some View {
+        Text(model.desktopNames[desktop.key] ?? "\(number(desktop, index: index))").font(model.look.font(.bold))
+    }
+
+    @ViewBuilder private func apps(_ desktop: Desktop, showEmpty: Bool = true) -> some View {
+        let look = model.look
+        if desktop.apps.isEmpty {
+            if showEmpty && model.desktopNames[desktop.key] == nil { Text("–").opacity(0.45) }
+        } else {
+            ForEach(desktop.apps.prefix(4), id: \.self) { pid in
+                if let icon = model.icon(for: pid) {
+                    Image(nsImage: icon).resizable().frame(width: look.size.iconSize, height: look.size.iconSize)
+                }
+            }
+            if desktop.apps.count > 4 { Text("+\(desktop.apps.count - 4)").opacity(0.7) }
+        }
+    }
+
+    @ViewBuilder private func menu(_ desktop: Desktop) -> some View {
+        Button("Name Desktop \(desktop.number)…") { model.rename(desktop) }
+        if model.desktopNames[desktop.key] != nil { Button("Show the Number Instead") { model.forget(desktop) } }
+        Divider()
+        Button("Hide Desktops") { model.hide(.desktops) }
+        BarSettingsButton()
+    }
+}
+
+/// One desktop's part of the joined desktops piece.
+private struct Segment<Content: View>: View {
+    let look: BarLook
+    let highlighted: Bool
+    var dimmed = false
+    @ViewBuilder var content: Content
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: max(2, look.cornerRadius - 3), style: .continuous)
+        HStack(spacing: 4) { content }
+            .foregroundStyle(highlighted ? look.onAccent : look.text)
+            .opacity(dimmed && !highlighted ? 0.5 : 1)
+            .padding(.horizontal, (look.size.pillHeight * 0.3).rounded())
+            .frame(minWidth: look.size.pillHeight - 6, minHeight: look.size.pillHeight - 6)
+            .background {
+                if highlighted {
+                    shape.fill(Color(nsColor: look.accent).opacity(0.95))
+                } else if hovering {
+                    shape.fill(Color.white.opacity(0.1))
+                }
+            }
+            .contentShape(shape)
+            .onHover { hovering = $0 }
     }
 }
 

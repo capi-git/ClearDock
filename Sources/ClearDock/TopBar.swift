@@ -12,6 +12,8 @@ struct BarLook: Equatable {
     var cornerRadius: CGFloat = 9
     var showDate = true
     var use24Hour = false
+    var desktopStyle = DesktopStyle.separate
+    var numberPerScreen = false
 
     /// Dark text on a light bar, light text otherwise.
     var text: Color {
@@ -91,6 +93,10 @@ final class BarPanel: OverlayPanel {
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         ignoresMouseEvents = false
     }
+
+    /// macOS keeps windows below the menu bar's spot even while the menu bar is hidden; the
+    /// bar goes exactly where it's put, so it can take that spot.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 /// Hosts a bar's view, and notices when the pointer reaches the very top of the screen, where
@@ -189,13 +195,16 @@ final class TopBarController {
     private func applyMenuBarSetting() {
         let wanted = BarSettings.enabled && BarSettings.replaceMenuBar
         if wanted {
-            guard SystemMenuBar.hide() else { return }
+            // Only once: other settings changes shouldn't ask System Events again.
+            guard !SystemMenuBar.isHiddenByClearDock, SystemMenuBar.hide() else { return }
         } else {
             guard SystemMenuBar.isHiddenByClearDock else { return }
             SystemMenuBar.restore()
         }
-        // The menu bar takes a moment to slide away or come back; move the bar once it has.
-        for delay in [0.4, 1.2] {
+        // Move the bar now, and again once the menu bar has finished sliding away or back,
+        // since windows and the notch area only settle then.
+        layout()
+        for delay in [0.4, 1.2, 3] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 MainActor.assumeIsolated { self?.layout() }
             }
@@ -286,7 +295,7 @@ final class TopBarController {
     private func layout() {
         guard running else { return }
         let screens = BarSettings.allScreens ? NSScreen.screens : Array(NSScreen.screens.prefix(1))
-        let replacesMenuBar = BarSettings.macMenuBarHidden
+        let replacesMenuBar = BarSettings.takesMenuBarsPlace
         let islands = Self.islands()
         let sharedDesktops = model.desktops.keys.contains("Main")
         var layouts: [String: BarLayout] = [:]
@@ -369,7 +378,7 @@ final class TopBarController {
     /// The pointer reached the top of the screen, so the macOS menu bar is about to slide down
     /// over the bar. Fade the bar out of its way, and back once the pointer leaves the menus.
     private func menuBarRevealing() {
-        guard BarSettings.macMenuBarHidden, revealTimer == nil else { return }
+        guard BarSettings.takesMenuBarsPlace, revealTimer == nil else { return }
         revealStarted = Date()
         setBarsVisible(false)
         let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
@@ -470,6 +479,8 @@ final class TopBarController {
         look.cornerRadius = CGFloat(BarSettings.cornerRadius)
         look.showDate = BarSettings.showDate
         look.use24Hour = BarSettings.use24Hour
+        look.desktopStyle = BarSettings.desktopStyle
+        look.numberPerScreen = BarSettings.numberPerScreen
         if model.look != look { model.look = look }
     }
 
