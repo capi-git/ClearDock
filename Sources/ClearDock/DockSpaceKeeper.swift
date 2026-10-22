@@ -66,6 +66,25 @@ final class DockSpaceKeeper {
         if changed || wasIdle { fitAllWindows() }
     }
 
+    /// The part of a screen windows are kept to, in the system's window coordinates: what macOS
+    /// leaves free (below its menu bar, beside its Dock), less the strips kept for Clear Dock and
+    /// the top bar.
+    func freeArea(on screen: NSScreen) -> CGRect {
+        let whole = Self.topDown(screen)
+        let visible = screen.visibleFrame
+        var minX = visible.minX, maxX = visible.maxX
+        var minY = Self.mainHeight - visible.maxY, maxY = Self.mainHeight - visible.minY
+        for strip in strips where strip.screen == whole {
+            switch strip.edge {
+            case .top: minY = max(minY, strip.line)
+            case .bottom: maxY = min(maxY, strip.line)
+            case .left: minX = max(minX, strip.line)
+            case .right: maxX = min(maxX, strip.line)
+            }
+        }
+        return CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
+    }
+
     /// The system's window coordinates start at the top-left of the main screen and grow downwards.
     private static var mainHeight: CGFloat { NSScreen.screens.first?.frame.height ?? 0 }
 

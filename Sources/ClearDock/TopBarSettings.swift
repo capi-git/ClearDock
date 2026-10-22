@@ -265,18 +265,6 @@ enum BarSettings {
 
     // MARK: Lock-in mode
 
-    /// The two apps, left then right, by bundle identifier.
-    static var lockInApps: [String] {
-        get { defaults.stringArray(forKey: "lockIn.apps") ?? [] }
-        set { defaults.set(newValue, forKey: "lockIn.apps") }
-    }
-
-    /// The desktop lock-in mode uses, by its id. The first time, it's the one you're on.
-    static var lockInDesktop: String? {
-        get { defaults.string(forKey: "lockIn.desktop") }
-        set { defaults.set(newValue, forKey: "lockIn.desktop") }
-    }
-
     /// How much of the width the left app gets.
     static var lockInSplit: Double {
         get { defaults.object(forKey: "lockIn.split") == nil ? 0.5 : min(0.8, max(0.2, defaults.double(forKey: "lockIn.split"))) }
@@ -298,12 +286,6 @@ enum BarSettings {
     static var lockInBorder: Bool {
         get { defaults.object(forKey: "lockIn.border") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "lockIn.border") }
-    }
-
-    /// A picture to use as the lock-in desktop's wallpaper, or nil to leave it as it is.
-    static var lockInWallpaper: String? {
-        get { defaults.string(forKey: "lockIn.wallpaper") }
-        set { defaults.set(newValue, forKey: "lockIn.wallpaper") }
     }
 
     static var gameMode: GameMode {

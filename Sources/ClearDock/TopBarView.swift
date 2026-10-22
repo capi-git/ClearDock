@@ -72,7 +72,7 @@ private struct BarItemView: View {
         switch kind {
         case .desktops: DesktopPills(model: model, key: desktopsKey)
         case .app: AppPill(model: model)
-        case .lockIn: LockInPill(model: model)
+        case .lockIn: LockInPill(model: model, desktopsKey: desktopsKey)
         case .song: if let track = model.track { SongPill(model: model, track: track) }
         case .volume: VolumePill(model: model)
         case .battery: if let percent = model.battery { BatteryPill(model: model, percent: percent) }
@@ -234,86 +234,39 @@ private struct AppPill: View {
     }
 }
 
-/// Lock-in mode: two apps side by side on their own desktop. Shows how long you've been locked in.
+/// Lock-in mode for the desktop showing on this bar's screen. Shows how long it's been locked in.
 private struct LockInPill: View {
     @ObservedObject var model: TopBarModel
+    let desktopsKey: String
     @Environment(\.barLook) private var look
 
     var body: some View {
-        Pill(look: look, highlighted: model.lockedIn, action: model.toggleLockIn) {
-            Image(systemName: model.lockedIn ? "lock.fill" : model.lockInStarting ? "hourglass" : "lock.open.fill")
+        let current = model.desktops[desktopsKey]?.first(where: \.isCurrent)
+        let started = current.flatMap { model.lockIns[$0.id] }
+        let choosing = current != nil && model.lockInChoosing == current?.id
+        Pill(look: look, highlighted: started != nil, action: model.toggleLockIn) {
+            Image(systemName: started != nil ? "lock.fill" : choosing ? "rectangle.split.2x1" : "lock.open.fill")
                 .font(look.font(.bold, size: look.size.fontSize - 1))
-                .foregroundStyle(model.lockedIn ? look.onAccent : Color(nsColor: look.accent))
-            if model.lockedIn, let started = model.lockInStarted {
+                .foregroundStyle(started != nil ? look.onAccent : Color(nsColor: look.accent))
+            if let started {
                 TimelineView(.periodic(from: started, by: 60)) { context in
                     Text("Locked in · " + Self.elapsed(since: started, at: context.date)).monospacedDigit()
                 }
             } else {
-                Text(model.lockInStarting ? "Locking in…" : "Lock in")
+                Text(choosing ? "Choose two…" : "Lock in")
             }
         }
         .contextMenu {
-            if model.lockedIn {
-                Button("Go to Lock-In Desktop") { model.toggleLockIn() }
-                Button("Unlock") { model.unlock() }
-            } else {
-                Button("Lock In") { model.toggleLockIn() }
-            }
-            Divider()
-            appMenu("Left App", index: 0)
-            appMenu("Right App", index: 1)
-            Button("Use This Desktop for Lock-In") { model.useDesktopForLockIn() }
+            Button(started != nil ? "Unlock This Desktop" : "Lock In This Desktop") { model.toggleLockIn() }
             Divider()
             Button("Hide Lock In") { model.hide(.lockIn) }
             BarSettingsButton()
         }
     }
 
-    @ViewBuilder private func appMenu(_ title: String, index: Int) -> some View {
-        let chosen = model.lockInApps.count > index ? model.lockInApps[index] : ""
-        Menu(title) {
-            ForEach(LockInChoices.running(), id: \.bundle) { app in
-                Toggle(app.name, isOn: Binding(get: { chosen == app.bundle }, set: { _ in model.setLockInApp(index, app.bundle) }))
-            }
-        }
-    }
-
     private static func elapsed(since start: Date, at now: Date) -> String {
         let minutes = max(0, Int(now.timeIntervalSince(start) / 60))
         return minutes < 60 ? "\(minutes)m" : String(format: "%dh %02dm", minutes / 60, minutes % 60)
-    }
-}
-
-/// Apps to choose from for lock-in mode.
-enum LockInChoices {
-    struct App: Hashable {
-        let bundle: String
-        let name: String
-    }
-
-    /// The apps open now, by name.
-    @MainActor static func running() -> [App] {
-        let me = getpid()
-        return NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular && $0.processIdentifier != me }
-            .compactMap { app in app.bundleIdentifier.map { App(bundle: $0, name: app.localizedName ?? $0) } }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    /// The apps open now and those in the Applications folders, by name.
-    @MainActor static func all() -> [App] {
-        var found = Set(running())
-        for folder in ["/Applications", "/System/Applications", NSString(string: "~/Applications").expandingTildeInPath] {
-            let items = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
-            for item in items where item.hasSuffix(".app") {
-                if let bundle = Bundle(path: "\(folder)/\(item)")?.bundleIdentifier {
-                    found.insert(App(bundle: bundle, name: String(item.dropLast(4))))
-                }
-            }
-        }
-        var seen = Set<String>()
-        return found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            .filter { seen.insert($0.bundle).inserted }
     }
 }
 

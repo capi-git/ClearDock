@@ -86,10 +86,10 @@ final class TopBarModel: ObservableObject {
     @Published var artColours: ArtColours?
     /// Screens whose bar is a thin line while a game is in front.
     @Published var thinScreens = Set<String>()
-    @Published var lockedIn = false
-    @Published var lockInStarting = false
-    @Published var lockInStarted: Date?
-    @Published var lockInApps: [String] = []
+    /// Locked-in desktops, by the window server's id for them, and when each was locked in.
+    @Published var lockIns: [UInt64: Date] = [:]
+    /// The desktop whose two windows are being chosen for lock-in mode.
+    @Published var lockInChoosing: UInt64?
     /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
     /// macOS menu bar sliding down underneath doesn't show through.
     @Published var backdropScreens = Set<String>()
@@ -112,9 +112,6 @@ final class TopBarModel: ObservableObject {
     var hoverDesktop: (Desktop?) -> Void = { _ in }
     var hoverSong: (Bool) -> Void = { _ in }
     var toggleLockIn: () -> Void = {}
-    var unlock: () -> Void = {}
-    var setLockInApp: (Int, String) -> Void = { _, _ in }
-    var useDesktopForLockIn: () -> Void = {}
 
     /// The song's look: tinted with the album cover's colours, when that's on.
     func songLook(_ base: BarLook) -> BarLook {
@@ -223,6 +220,7 @@ final class TopBarController {
     private var leaving = Set<CGDirectDisplayID>()
     private let popover = BarPopover()
     private let lockIn = LockIn()
+    private let lockInPicker = LockInPicker()
 
     init() {
         nowPlaying.onChange = { [weak self] in
@@ -273,34 +271,24 @@ final class TopBarController {
         model.hoverDesktop = { [weak self] desktop in self?.hoverDesktop(desktop) }
         lockIn.onChange = { [weak self] in
             guard let self else { return }
-            self.model.lockedIn = self.lockIn.isOn
-            self.model.lockInStarting = self.lockIn.isStarting
-            self.model.lockInStarted = self.lockIn.started
-        }
-        lockIn.barBottom = { [weak self] screen in
-            self?.barFrame(on: screen, replacesMenuBar: BarSettings.takesMenuBarsPlace).minY ?? screen.frame.maxY
+            let lockIns = self.lockIn.lockedIn
+            if self.model.lockIns != lockIns { self.model.lockIns = lockIns }
+            if self.model.lockInChoosing != self.lockIn.choosing { self.model.lockInChoosing = self.lockIn.choosing }
         }
         lockIn.accent = { [weak self] screen in
             guard let self else { return .systemPurple }
-            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen?.displayUUID ?? "Main")
+            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
             return self.model.look(for: key).accent
         }
+        lockIn.choose = { [weak self] choices, screen, done in
+            guard let self else { return done(nil) }
+            self.popover.hide()
+            let bottom = screen.displayID.flatMap { self.panels[$0]?.panel.frame.minY } ?? screen.visibleFrame.maxY
+            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
+            self.lockInPicker.show(choices, look: self.model.look(for: key), below: bottom, on: screen, done: done)
+        }
+        lockIn.dismissChooser = { [weak self] in self?.lockInPicker.close() }
         model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
-        model.unlock = { [weak self] in self?.lockIn.unlock() }
-        model.setLockInApp = { index, bundle in
-            var apps = BarSettings.lockInApps
-            while apps.count < 2 { apps.append("") }
-            apps[index] = bundle
-            BarSettings.lockInApps = apps
-            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
-        }
-        model.useDesktopForLockIn = { [weak self] in
-            guard let self else { return }
-            let mouse = NSEvent.mouseLocation
-            let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen?.displayUUID ?? "Main")
-            BarSettings.lockInDesktop = self.model.desktops[key]?.first(where: \.isCurrent)?.key
-        }
         model.hoverSong = { [weak self] inside in self?.hoverSong(inside) }
         model.hide = { kind in
             BarSettings.items = BarSettings.items.map { $0.kind == kind ? BarItem(kind: $0.kind, side: $0.side, isOn: false) : $0 }
@@ -313,9 +301,9 @@ final class TopBarController {
         settingsChanged()
     }
 
-    /// Clear Dock is quitting: put back the apps lock-in mode hid.
+    /// Clear Dock is quitting: put back the windows lock-in mode tucked away.
     func prepareForQuit() {
-        lockIn.exit()
+        lockIn.endAll()
     }
 
     func settingsChanged() {
@@ -325,7 +313,8 @@ final class TopBarController {
         model.items = BarSettings.items
         model.desktopNames = BarSettings.desktopNames
         model.desktopColours = BarSettings.desktopColours
-        model.lockInApps = BarSettings.lockInApps
+        // Without its piece in the bar there'd be no way to unlock.
+        if !BarSettings.items.contains(where: { $0.kind == .lockIn && $0.isOn }) { lockIn.endAll() }
         applyLook()
         refreshWallpaperColors()
         layout()
@@ -426,7 +415,8 @@ final class TopBarController {
         revealTimer?.invalidate()
         revealTimer = nil
         endHold()
-        lockIn.exit()
+        lockIn.endAll()
+        lockInPicker.close()
         exposeTimer?.invalidate()
         exposeTimer = nil
         exposeScreens.removeAll()
@@ -827,7 +817,8 @@ final class TopBarController {
     // MARK: What it shows
 
     private func refreshDesktops() {
-        guard running, BarSettings.items.contains(where: { $0.kind == .desktops && $0.isOn }) else { return }
+        // Even without the desktops in the bar: their colours, and lock-in mode, follow the desktop you're on.
+        guard running else { return }
         let desktops = DesktopReader.read()
         if desktops != model.desktops {
             let sharedBefore = model.desktops.keys.contains("Main")

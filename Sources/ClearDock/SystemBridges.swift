@@ -123,6 +123,14 @@ enum WindowSpaces {
         guard let connection, let copyDisplaySpaces else { return [] }
         return copyDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]] ?? []
     }
+
+    /// The desktop (or full-screen app) showing on each display right now, by the window server's ids.
+    static func currentSpaceIDs() -> Set<UInt64> {
+        Set(displaySpaces().compactMap { display in
+            let current = display["Current Space"] as? [String: Any]
+            return ((current?["id64"] ?? current?["ManagedSpaceID"]) as? NSNumber)?.uint64Value
+        })
+    }
 }
 
 /// The app's own list of its windows, through Accessibility. It includes minimized windows,

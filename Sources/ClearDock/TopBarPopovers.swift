@@ -439,3 +439,133 @@ private struct PlayerButton: View {
             .onTapGesture(perform: action)
     }
 }
+
+// MARK: - Choosing two windows to lock in
+
+/// A small panel under the bar for choosing the two windows to lock in: the first you click goes
+/// on the left, the second on the right. It stays until you've chosen, press Escape, or click
+/// somewhere else.
+@MainActor
+final class LockInPicker {
+    private let panel = PopoverPanel()
+    private var monitors: [Any] = []
+    private var finish: (([LockIn.Choice]?) -> Void)?
+
+    func show(_ choices: [LockIn.Choice], look: BarLook, below barBottom: CGFloat, on screen: NSScreen,
+              done: @escaping ([LockIn.Choice]?) -> Void) {
+        close()
+        finish = done
+        let view = LockInPickerView(choices: Array(choices.prefix(10)), look: look, tucksOthers: BarSettings.lockInHideOthers) { [weak self] picked in
+            // After the click that chose them has finished.
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.close(with: picked) } }
+        }
+        panel.setContent(AnyView(view))
+        let size = panel.fittingSize
+        let mouse = NSEvent.mouseLocation
+        let x = min(max((mouse.x - size.width / 2).rounded(), screen.frame.minX + 8), screen.frame.maxX - size.width - 8)
+        panel.setFrame(NSRect(x: x, y: barBottom - 6 - size.height, width: size.width, height: size.height), display: true)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+
+        let cancel: () -> Void = { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.close() } }
+        }
+        monitors = [
+            NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in cancel() },
+            NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in if event.keyCode == 53 { cancel() } },
+            // Clicks on the bar are left to it: clicking Lock In again closes this.
+            NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                if let self, event.window !== self.panel, !(event.window is BarPanel) { cancel() }
+                return event
+            },
+        ].compactMap { $0 }
+    }
+
+    /// Closes it, with the two windows chosen, or nil if you didn't choose.
+    func close(with picked: [LockIn.Choice]? = nil) {
+        guard let finish else { return }
+        self.finish = nil
+        monitors.forEach(NSEvent.removeMonitor)
+        monitors.removeAll()
+        panel.orderOut(nil)
+        panel.setContent(nil)
+        finish(picked)
+        MemoryRelief.soon()
+    }
+}
+
+private struct LockInPickerView: View {
+    let choices: [LockIn.Choice]
+    let look: BarLook
+    let tucksOthers: Bool
+    let done: ([LockIn.Choice]) -> Void
+    @State private var left: CGWindowID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Lock in two windows").font(.system(size: 13, weight: .bold, design: .rounded))
+                Text(left == nil ? "Choose the one for the left." : "Now the one for the right.")
+                    .font(.system(size: 12, design: .rounded)).opacity(0.7)
+            }
+            VStack(spacing: 2) {
+                ForEach(choices) { choice in
+                    PickerRow(choice: choice, isLeft: left == choice.id, look: look) {
+                        if left == choice.id {
+                            left = nil
+                        } else if let chosen = choices.first(where: { $0.id == left }) {
+                            done([chosen, choice])
+                        } else {
+                            left = choice.id
+                        }
+                    }
+                }
+            }
+            if tucksOthers {
+                Text("The rest are tucked away until you unlock.")
+                    .font(.system(size: 11, design: .rounded)).opacity(0.55)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(12)
+        .frame(width: 300)
+        .background(PopoverBackground(look: look))
+    }
+}
+
+private struct PickerRow: View {
+    let choice: LockIn.Choice
+    let isLeft: Bool
+    let look: BarLook
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let icon = choice.icon {
+                Image(nsImage: icon).resizable().frame(width: 22, height: 22)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(choice.app).font(.system(size: 13, weight: .semibold, design: .rounded)).lineLimit(1)
+                if let title = choice.title, !title.isEmpty {
+                    Text(title).font(.system(size: 11, design: .rounded)).opacity(0.65).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if isLeft {
+                Text("Left")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(look.onAccent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color(nsColor: look.accent)))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(isLeft ? 0.16 : hovering ? 0.1 : 0)))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: action)
+    }
+}
