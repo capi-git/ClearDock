@@ -112,6 +112,7 @@ final class TopBarModel: ObservableObject {
     var hoverDesktop: (Desktop?) -> Void = { _ in }
     var hoverSong: (Bool) -> Void = { _ in }
     var toggleLockIn: () -> Void = {}
+    var unlock: () -> Void = {}
     var setLockInApp: (Int, String) -> Void = { _, _ in }
     var useDesktopForLockIn: () -> Void = {}
 
@@ -285,6 +286,7 @@ final class TopBarController {
             return self.model.look(for: key).accent
         }
         model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
+        model.unlock = { [weak self] in self?.lockIn.unlock() }
         model.setLockInApp = { index, bundle in
             var apps = BarSettings.lockInApps
             while apps.count < 2 { apps.append("") }

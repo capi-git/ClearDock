@@ -253,7 +253,12 @@ private struct LockInPill: View {
             }
         }
         .contextMenu {
-            Button(model.lockedIn ? "Unlock" : "Lock In") { model.toggleLockIn() }
+            if model.lockedIn {
+                Button("Go to Lock-In Desktop") { model.toggleLockIn() }
+                Button("Unlock") { model.unlock() }
+            } else {
+                Button("Lock In") { model.toggleLockIn() }
+            }
             Divider()
             appMenu("Left App", index: 0)
             appMenu("Right App", index: 1)

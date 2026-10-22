@@ -4,8 +4,9 @@ import ApplicationServices
 /// Lock-in mode: two apps of your choosing side by side on a desktop of their own, with the
 /// wallpaper showing around them and a glowing edge on the one you're using. They stay stuck
 /// together: drag the edge between them to share the screen differently, or drag one over the
-/// other's side to swap them; anything else snaps back. Other apps are hidden while you're locked
-/// in, and come back afterwards.
+/// other's side to swap them; anything else snaps back. Only that desktop is locked in: other
+/// windows on it are tucked away (minimized) meanwhile and come back afterwards, and your other
+/// desktops are left as they are.
 ///
 /// macOS doesn't let apps move a window to another desktop, so an app with no window on the
 /// lock-in desktop is asked for a new one (its own "New Window" command). macOS puts new windows on
@@ -32,7 +33,13 @@ final class LockIn {
     /// Left, then right.
     private var panes: [Pane] = []
     private var screen: NSScreen?
-    private var hidden: [NSRunningApplication] = []
+    /// Other windows on the lock-in desktop, minimized while you're locked in.
+    private var tucked: [AXUIElement] = []
+    /// The lock-in desktop's id while locked in.
+    private var space: UInt64?
+    /// The window being resized by you right now, which the other follows as you drag.
+    private var driving: AXUIElement?
+    private var lastFollow: CFTimeInterval = 0
     private var observers: [pid_t: AXObserver] = [:]
     private var pendingFit: DispatchWorkItem?
     private var border: BorderPanel?
@@ -42,8 +49,38 @@ final class LockIn {
 
     // MARK: Turning it on and off
 
+    /// Locks in; or, while locked in, goes back to the lock-in desktop if you're elsewhere, and
+    /// unlocks if you're on it.
     func toggle() {
-        if isOn { exit() } else { enter() }
+        guard isOn else { return enter() }
+        if !goToLockInDesktop() { unlock() }
+    }
+
+    /// Unlocks, going to the lock-in desktop first if you're elsewhere, so the windows tucked away
+    /// there come back on it.
+    func unlock() {
+        guard isOn else { return }
+        if goToLockInDesktop() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                MainActor.assumeIsolated { self?.exit() }
+            }
+        } else {
+            exit()
+        }
+    }
+
+    /// Switches to the lock-in desktop when it isn't the one showing. Returns whether it did.
+    private func goToLockInDesktop() -> Bool {
+        guard let screen, let key = BarSettings.lockInDesktop else { return false }
+        let desktops = DesktopReader.read()
+        guard let target = (desktops[screen.displayUUID ?? "Main"] ?? desktops["Main"])?.first(where: { $0.key == key }),
+              !target.isCurrent else { return false }
+        // The desktop switching shortcuts act on the screen under the pointer.
+        if !NSMouseInRect(NSEvent.mouseLocation, screen.frame, false) {
+            CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.frame.midY))
+        }
+        DesktopSwitcher.go(to: target)
+        return true
     }
 
     private func enter() {
@@ -73,6 +110,7 @@ final class LockIn {
                 BarSettings.lockInDesktop = Self.currentDesktop(on: screen)?.key
             }
             guard let space = Self.currentDesktop(on: screen)?.id else { return }
+            self.space = space
 
             // The two apps: chosen in settings, filled in with the ones you're using on this desktop.
             var apps = BarSettings.lockInApps.filter { !$0.isEmpty }
@@ -104,7 +142,7 @@ final class LockIn {
                 // Sets the wallpaper of the desktop you're on, which is the lock-in desktop.
                 try? NSWorkspace.shared.setDesktopImageURL(URL(fileURLWithPath: path), for: screen, options: [:])
             }
-            if BarSettings.lockInHideOthers { hideOthers() }
+            if BarSettings.lockInHideOthers { tuckOthers(on: space) }
 
             isOn = true
             started = Date()
@@ -122,18 +160,34 @@ final class LockIn {
         stopWatching()
         border?.orderOut(nil)
         border = nil
-        for app in hidden where !app.isTerminated { app.unhide() }
-        hidden.removeAll()
+        for window in tucked {
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        tucked.removeAll()
         panes.removeAll()
+        space = nil
+        driving = nil
         onChange()
     }
 
-    private func hideOthers() {
-        let keep = Set(panes.map(\.pid) + [getpid()])
-        hidden = NSWorkspace.shared.runningApplications.filter {
-            $0.activationPolicy == .regular && !keep.contains($0.processIdentifier) && !$0.isHidden
+    /// Minimizes the other windows on the lock-in desktop (only there), so just the two apps and
+    /// the wallpaper show.
+    private func tuckOthers(on space: UInt64) {
+        let keep = Set(panes.map(\.id))
+        let me = getpid()
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != me {
+            let element = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(element, 0.5)
+            for window in (Self.attribute(element, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
+                guard (Self.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole,
+                      (Self.attribute(window, kAXMinimizedAttribute) as? Bool) != true,
+                      let id = AppWindowList.windowID(of: window), !keep.contains(id),
+                      WindowSpaces.spaceIDs(of: id) == [space] else { continue }
+                if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+                    tucked.append(window)
+                }
+            }
         }
-        hidden.forEach { $0.hide() }
     }
 
     // MARK: Finding the windows
@@ -293,6 +347,38 @@ final class LockIn {
 
     private static func clampSplit(_ value: CGFloat) -> Double { Double(min(0.8, max(0.2, value))) }
 
+    /// Resizes the other window to fill the rest of the space as you drag one's inner edge,
+    /// up to about sixty times a second.
+    private func follow(_ element: AXUIElement) {
+        guard panes.count == 2, let area, let index = panes.firstIndex(where: { CFEqual($0.element, element) }) else { return }
+        // Only the window you're dragging leads; the other's own resizing (from following) doesn't.
+        if let driving, !CFEqual(driving, element) { return }
+        let now = CACurrentMediaTime()
+        guard now - lastFollow > 1.0 / 60 else { return }
+        let goals = targets
+        guard let moved = Self.frame(of: element) else { return }
+        let gap = CGFloat(BarSettings.lockInGap)
+        let other = panes[1 - index].element
+        if index == 0 {
+            // The left window's right edge is the divider, while its left edge stays put.
+            guard abs(moved.minX - goals[0].minX) < 3 else { return }
+            let x = moved.maxX + gap
+            guard area.maxX - x > 120 else { return }
+            driving = element
+            lastFollow = now
+            Self.setPosition(other, CGPoint(x: x, y: goals[1].minY))
+            Self.setSize(other, CGSize(width: area.maxX - x, height: goals[1].height))
+        } else {
+            // The right window's left edge is the divider, while its right edge stays put.
+            guard abs(moved.maxX - goals[1].maxX) < 3 else { return }
+            let width = moved.minX - gap - area.minX
+            guard width > 120 else { return }
+            driving = element
+            lastFollow = now
+            Self.setSize(other, CGSize(width: width, height: goals[0].height))
+        }
+    }
+
     private func watch() {
         for pane in panes where observers[pane.pid] == nil {
             var created: AXObserver?
@@ -337,12 +423,17 @@ final class LockIn {
             return exit()
         }
         updateBorder()
+        // While you drag one window's inner edge, the other follows it straight away.
+        if notification == kAXWindowResizedNotification, NSEvent.pressedMouseButtons != 0 {
+            follow(element)
+        }
         // Wait until the mouse button is up, so it never fights a drag you're in the middle of.
         pendingFit?.cancel()
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.isOn else { return }
                 if NSEvent.pressedMouseButtons != 0 { return self.windowChanged(element, notification) }
+                self.driving = nil
                 self.settle()
             }
         }

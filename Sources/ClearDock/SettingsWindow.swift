@@ -741,12 +741,12 @@ private struct TopBarTab: View {
                     }
                 }
                 Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
-                Toggle("Hide other apps while locked in", isOn: $store.lockInHideOthers)
+                Toggle("Tuck away other windows on the lock-in desktop", isOn: $store.lockInHideOthers)
                 Toggle("Glowing edge around the app you're using", isOn: $store.lockInBorder)
             } header: {
                 Text("Lock-in mode")
             } footer: {
-                Text("Click Lock In in the bar to go to your lock-in desktop with these two apps side by side. Drag the edge between them to share the screen differently, or drag one onto the other's side to swap them. Click again to unlock and bring your other apps back. An app with no window on the lock-in desktop is asked for a new one, since macOS doesn't let apps move windows between desktops.")
+                Text("Click Lock In in the bar to go to your lock-in desktop with these two apps side by side. Drag the edge between them to share the screen differently, or drag one onto the other's side to swap them. Only that desktop is locked in: other windows on it are minimized meanwhile, and your other desktops are left alone. Click Lock In again on that desktop to unlock and bring those windows back (from another desktop, it takes you back there). An app with no window on the lock-in desktop is asked for a new one, since macOS doesn't let apps move windows between desktops.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

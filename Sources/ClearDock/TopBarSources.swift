@@ -134,13 +134,37 @@ enum DesktopSwitcher {
         return (shortcut.key, shortcut.flags.union([.maskSecondaryFn, .maskNumericPad]))
     }
 
+    /// Presses a shortcut the way your hands would: holds its modifier keys, presses the key, and
+    /// lets go of everything. Sending only the key with modifier flags attached leaves macOS
+    /// thinking Control (or another modifier) is still held, which turns every click into a
+    /// Control-click until you press it yourself.
     private static func press(_ shortcut: Shortcut) {
         let source = CGEventSource(stateID: .hidSystemState)
+        let modifierKeys: [(key: CGKeyCode, flag: CGEventFlags)] = [
+            (59, .maskControl), (58, .maskAlternate), (56, .maskShift), (55, .maskCommand),
+        ].filter { shortcut.flags.contains($0.flag) }
+        func modifiers(_ flags: CGEventFlags, _ key: CGKeyCode) {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
+            event?.type = .flagsChanged
+            event?.flags = flags
+            event?.post(tap: .cghidEventTap)
+        }
+        var held: CGEventFlags = []
+        for modifier in modifierKeys {
+            held.insert(modifier.flag)
+            modifiers(held, modifier.key)
+        }
         for down in [true, false] {
             let event = CGEvent(keyboardEventSource: source, virtualKey: shortcut.key, keyDown: down)
             event?.flags = shortcut.flags
             event?.post(tap: .cghidEventTap)
         }
+        for modifier in modifierKeys.reversed() {
+            held.remove(modifier.flag)
+            modifiers(held, modifier.key)
+        }
+        // Arrow keys carry the Fn and keypad flags too; make sure nothing is left held.
+        modifiers([], 63)
     }
 
     /// The "Switch to Desktop N" shortcut, if it's turned on in Keyboard Shortcuts > Mission Control.
