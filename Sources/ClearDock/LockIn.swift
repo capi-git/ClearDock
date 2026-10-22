@@ -350,6 +350,9 @@ private final class LockInSession {
     /// While you drag the edge between them, and until both apps have caught up afterwards.
     private var dragging = false
     private var draggedWidth: CGFloat?
+    /// Where on the edge you took hold of it, from its left side.
+    private var grabOffset: CGFloat = 0
+    private var dividerMoved = false
     private var observers: [pid_t: AXObserver] = [:]
     private var pendingSettle: DispatchWorkItem?
     private let divider = DividerPanel()
@@ -371,8 +374,8 @@ private final class LockInSession {
         self.display = display
         self.panes = panes
         movers = panes.map { WindowMover($0.element) }
-        divider.onBegin = { [weak self] in self?.dividerGrabbed() }
-        divider.onDrag = { [weak self] x in self?.dividerDragged(to: x) }
+        divider.onBegin = { [weak self] offset in self?.dividerGrabbed(at: offset) }
+        divider.onDrag = { [weak self] _ in self?.dividerMoved = true }
         divider.onEnd = { [weak self] in self?.dividerReleased() }
     }
 
@@ -485,22 +488,30 @@ private final class LockInSession {
     // apps themselves are resized once, when you let go: apps built on web pages (TradingView,
     // Discord, Spotify) can't redraw at every width quickly enough to keep up.
 
-    private func dividerGrabbed() {
+    private func dividerGrabbed(at offset: CGFloat) {
         guard !ended, let area, let frames = drawnFrames ?? currentFrames() else { return }
         movers.forEach { $0.forget() }
         dragging = true
+        dividerMoved = false
+        grabOffset = offset
+        // At each refresh of the screen it looks where the pointer is right then, rather than
+        // where the last mouse event said: mice and screens update at different rates, and
+        // going by the events makes it lag a frame now and then and catch up.
         let overlay = DragOverlay(over: Self.flipped(area), icons: panes.map { NSRunningApplication(processIdentifier: $0.pid)?.icon },
-                                  color: accent(), glow: BarSettings.lockInBorder)
+                                  color: accent(), glow: BarSettings.lockInBorder) { [weak self] in
+            guard let self, self.dividerMoved else { return nil }
+            return self.split(at: NSEvent.mouseLocation.x - self.grabOffset)?.map(Self.flipped)
+        }
         overlay.move(frames.map(Self.flipped))
         self.overlay = overlay
         // It draws the glow while you drag; the usual one steps aside.
         glows.forEach { $0.hide() }
     }
 
-    /// The edge was dragged so its left side is at `x`: the left window ends there and the right
+    /// Where the two go with the edge's left side at `x`: the left window ends there and the right
     /// one starts after the gap.
-    private func dividerDragged(to x: CGFloat) {
-        guard !ended, panes.count == 2, let area else { return }
+    private func split(at x: CGFloat) -> [CGRect]? {
+        guard !ended, panes.count == 2, let area else { return nil }
         let gap = CGFloat(BarSettings.lockInGap)
         let usable = area.width - gap
         let narrowest = max(120, usable * 0.2, minimumWidths[panes[0].id] ?? 0)
@@ -509,13 +520,15 @@ private final class LockInSession {
         let left = CGRect(x: area.minX, y: area.minY, width: width, height: area.height)
         let right = CGRect(x: left.maxX + gap, y: area.minY, width: area.maxX - left.maxX - gap, height: area.height)
         draggedWidth = width
-        overlay?.move([Self.flipped(left), Self.flipped(right)])
+        return [left, right]
     }
 
     private func dividerReleased() {
         let overlay = self.overlay
         self.overlay = nil
-        guard let width = draggedWidth, let area, panes.count == 2 else {
+        // Where you let go.
+        if dividerMoved { _ = split(at: NSEvent.mouseLocation.x - grabOffset) }
+        guard dividerMoved, let width = draggedWidth, let area, panes.count == 2 else {
             // Taken hold of without being moved.
             overlay?.finish()
             dragging = false
@@ -803,7 +816,8 @@ final class DividerPanel: NSPanel {
     /// How far it reaches over each window.
     static let overlap: CGFloat = 4
 
-    var onBegin: () -> Void = {}
+    /// Where on the edge it was taken hold of, from its left side.
+    var onBegin: (CGFloat) -> Void = { _ in }
     /// The edge's new left side, as you drag it.
     var onDrag: (CGFloat) -> Void = { _ in }
     var onEnd: () -> Void = {}
@@ -869,7 +883,7 @@ private final class DividerView: NSView {
         gripHidden = true
         // Where on the edge you took hold of it, so it doesn't jump to the pointer.
         grabbedAt = NSEvent.mouseLocation.x - (window?.frame.minX ?? 0)
-        panel?.onBegin()
+        panel?.onBegin(grabbedAt)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -1002,14 +1016,16 @@ final class DragOverlay: NSObject {
     private var iconViews: [NSImageView] = []
     private var glows: [CAShapeLayer] = []
     private let grip = CALayer()
-    private var pending: [NSRect]?
-    private var placed = false
+    /// Where the two windows go right now, asked at each refresh of the screen.
+    private let follow: () -> [NSRect]?
+    private var shown: [NSRect] = []
     private var link: CADisplayLink?
 
     /// `area` is the lock-in space, in the usual bottom-up screen coordinates.
-    init(over area: NSRect, icons: [NSImage?], color: NSColor, glow: Bool) {
+    init(over area: NSRect, icons: [NSImage?], color: NSColor, glow: Bool, follow: @escaping () -> [NSRect]?) {
         let frame = area.insetBy(dx: -Self.reach, dy: -Self.reach)
         origin = frame.origin
+        self.follow = follow
         panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         panel.isOpaque = false
@@ -1072,13 +1088,11 @@ final class DragOverlay: NSObject {
         self.link = link
     }
 
-    /// Where the two windows now go, left then right, in the usual bottom-up screen coordinates.
+    /// Puts the two windows' covers at `frames`, left then right, in the usual bottom-up screen coordinates.
     func move(_ frames: [NSRect]) {
-        guard placed else {
-            placed = true
-            return apply(frames)
-        }
-        pending = frames
+        guard frames != shown else { return }
+        shown = frames
+        apply(frames)
     }
 
     /// Lifts the covers, then goes away.
@@ -1097,9 +1111,7 @@ final class DragOverlay: NSObject {
     }
 
     @objc private func step(_ link: CADisplayLink) {
-        guard let frames = pending else { return }
-        pending = nil
-        apply(frames)
+        if let frames = follow() { move(frames) }
     }
 
     private func apply(_ frames: [NSRect]) {
