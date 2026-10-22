@@ -102,7 +102,7 @@ final class LockIn {
                          "Turn on Clear Dock in Privacy & Security > Accessibility, then click Lock In again.")
             return SystemSettings.open("com.apple.preference.security?Privacy_Accessibility")
         }
-        let windows = Self.windows(on: desktop)
+        let (windows, apart) = Self.windows(on: desktop)
         var apps: [pid_t] = []
         for window in windows where !apps.contains(window.pid) { apps.append(window.pid) }
         switch (windows.count, apps.count) {
@@ -110,11 +110,11 @@ final class LockIn {
             Self.explain("Lock-in needs two windows on this desktop", "Open the two apps you want side by side here, then click Lock In.")
         case (2, _):
             // Each stays on the side it's on now.
-            start(windows.sorted { $0.frame.midX < $1.frame.midX }, of: windows, on: desktop.id, screen: screen)
+            start(windows.sorted { $0.frame.midX < $1.frame.midX }, of: windows, hiding: apart, on: desktop.id, screen: screen)
         case (_, 2):
             // The front window of each app, each on the side it's on now.
             let fronts = apps.compactMap { pid in windows.first { $0.pid == pid } }
-            start(fronts.sorted { $0.frame.midX < $1.frame.midX }, of: windows, on: desktop.id, screen: screen)
+            start(fronts.sorted { $0.frame.midX < $1.frame.midX }, of: windows, hiding: apart, on: desktop.id, screen: screen)
         default:
             choosing = desktop.id
             onChange()
@@ -124,13 +124,14 @@ final class LockIn {
                 self.onChange()
                 // Only if you're still on that desktop.
                 guard let picked, Self.currentDesktop(on: screen)?.id == desktop.id else { return }
-                self.start(picked, of: windows, on: desktop.id, screen: screen)
+                self.start(picked, of: windows, hiding: apart, on: desktop.id, screen: screen)
             }
         }
     }
 
-    /// Locks in two of the desktop's windows; the rest of `all` are tucked away, if that's on.
-    private func start(_ picked: [Choice], of all: [Choice], on space: UInt64, screen: NSScreen) {
+    /// Locks in two of the desktop's windows; the rest of `all` are tucked away, and the apps in
+    /// `apart` hidden, if that's on.
+    private func start(_ picked: [Choice], of all: [Choice], hiding apart: Set<pid_t>, on space: UInt64, screen: NSScreen) {
         guard picked.count == 2, picked[0].id != picked[1].id, let display = screen.displayID, sessions[space] == nil else { return }
         restoreWaiting(on: space)
         let session = LockInSession(space: space, display: display,
@@ -147,6 +148,7 @@ final class LockIn {
         if BarSettings.lockInHideOthers {
             let kept = Set(picked.map(\.id))
             session.tuck(all.filter { !kept.contains($0.id) }.map(\.element))
+            session.hide(apart)
         }
         // First, so the dock is out of the way before the two are given the room.
         publish()
@@ -178,6 +180,8 @@ final class LockIn {
         guard sessions[session.space] === session else { return }
         sessions[session.space] = nil
         session.finish()
+        // Hidden apps come back on their own desktops, wherever you are.
+        session.hiddenApps.forEach { NSRunningApplication(processIdentifier: $0)?.unhide() }
         if now || WindowSpaces.currentSpaceIDs().contains(session.space) {
             Self.unminimize(session.tucked)
         } else if !session.tucked.isEmpty {
@@ -259,11 +263,18 @@ final class LockIn {
         return (desktops[screen.displayUUID ?? "Main"] ?? desktops["Main"])?.first(where: \.isCurrent)
     }
 
-    /// The ordinary windows on a desktop, front-most first.
-    private static func windows(on desktop: Desktop) -> [Choice] {
+    /// The ordinary windows on a desktop, front-most first, and the apps with windows there that
+    /// can't be moved or tucked away one window at a time: games, which are left alone, and apps
+    /// that don't describe their windows to Accessibility (like League of Legends' launcher).
+    private static func windows(on desktop: Desktop) -> (choices: [Choice], apart: Set<pid_t>) {
         var elements: [pid_t: [CGWindowID: AXUIElement]] = [:]
         var choices: [Choice] = []
+        var apart = Set<pid_t>()
         for window in desktop.windows {
+            if Games.isGame(window.app) {
+                apart.insert(window.app)
+                continue
+            }
             if elements[window.app] == nil {
                 let app = AXUIElementCreateApplication(window.app)
                 AXUIElementSetMessagingTimeout(app, 0.5)
@@ -276,7 +287,10 @@ final class LockIn {
                 }
                 elements[window.app] = found
             }
-            guard let element = elements[window.app]?[window.id] else { continue }
+            guard let element = elements[window.app]?[window.id] else {
+                if elements[window.app]?.isEmpty == true { apart.insert(window.app) }
+                continue
+            }
             let app = NSRunningApplication(processIdentifier: window.app)
             choices.append(Choice(id: window.id, pid: window.app, element: element, frame: window.frame,
                                   app: app?.localizedName ?? "App", icon: app?.icon,
@@ -286,7 +300,7 @@ final class LockIn {
         for index in choices.indices where choices.filter({ $0.pid == choices[index].pid }).count < 2 {
             choices[index].title = nil
         }
-        return choices
+        return (choices, apart.subtracting(choices.map(\.pid)))
     }
 
     // MARK: Helpers
@@ -337,6 +351,9 @@ private final class LockInSession {
     let started = Date()
     /// Other windows on the desktop, minimized while it's locked in.
     private(set) var tucked: [AXUIElement] = []
+    /// Apps hidden while it's locked in: games, and apps whose windows can't be minimized one at a
+    /// time. Hiding is the gentlest way macOS has of putting an app away.
+    private(set) var hiddenApps: [pid_t] = []
     /// Whether the desktop is the one showing on its display.
     var showing = true
     var accent: () -> NSColor = { .systemPurple }
@@ -407,6 +424,12 @@ private final class LockInSession {
     }
 
     /// Minimizes the desktop's other windows, so just the two and the wallpaper show.
+    func hide(_ apps: Set<pid_t>) {
+        for pid in apps where !hiddenApps.contains(pid) && !involves(pid) {
+            if NSRunningApplication(processIdentifier: pid)?.hide() == true { hiddenApps.append(pid) }
+        }
+    }
+
     func tuck(_ windows: [AXUIElement]) {
         for window in windows where AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
             tucked.append(window)
@@ -592,7 +615,15 @@ private final class LockInSession {
         for (pid, ids) in found {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.3)
-            for window in (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
+            let windows = (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+            // A game starting up is left alone (it may be a match you're joining); apps that can't
+            // be moved one window at a time are hidden instead.
+            if Games.isGame(pid) { continue }
+            if windows.isEmpty {
+                if BarSettings.lockInHideOthers { hide([pid]) }
+                continue
+            }
+            for window in windows {
                 guard (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole,
                       let id = AppWindowList.windowID(of: window), ids.contains(id) else { continue }
                 if let elsewhere {
@@ -1064,20 +1095,21 @@ final class DragOverlay: NSObject {
         } else {
             coverHost.layer = CALayer()
             coverHost.wantsLayer = true
-            // Dark, with a hint of the highlight colour, like the glow round it.
-            let tint = (NSColor(white: 0.1, alpha: 1).blended(withFraction: 0.18, of: color) ?? .black).withAlphaComponent(0.95)
+            // Nearly black, with the faintest hint of the highlight colour, like the glow round it.
+            let tint = (NSColor(white: 0.05, alpha: 1).blended(withFraction: 0.07, of: color) ?? .black).withAlphaComponent(0.96)
             let scale = NSScreen.screens.first { $0.frame.intersects(frame) }?.backingScaleFactor ?? 2
             for icon in icons {
                 let cover = CALayer()
                 cover.backgroundColor = tint.cgColor
                 cover.cornerRadius = GlowFrame.cornerRadius
                 cover.cornerCurve = .continuous
-                cover.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+                cover.borderColor = NSColor.white.withAlphaComponent(0.05).cgColor
                 cover.borderWidth = 1
                 let iconLayer = CALayer()
                 iconLayer.contents = icon
                 iconLayer.contentsGravity = .resizeAspect
                 iconLayer.contentsScale = scale
+                iconLayer.opacity = 0.8
                 cover.addSublayer(iconLayer)
                 coverHost.layer?.addSublayer(cover)
                 plain.append(cover)
@@ -1103,7 +1135,7 @@ final class DragOverlay: NSObject {
                 glows.append(layer)
             }
         }
-        grip.backgroundColor = NSColor.white.withAlphaComponent(0.9).cgColor
+        grip.backgroundColor = NSColor.white.withAlphaComponent(0.7).cgColor
         grip.cornerRadius = 2
         top.layer?.addSublayer(grip)
         root.addSubview(top)
