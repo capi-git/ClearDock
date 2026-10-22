@@ -77,6 +77,13 @@ final class DockSpaceKeeper {
         let visible = screen.visibleFrame
         var minX = visible.minX, maxX = visible.maxX
         var minY = Self.mainHeight - visible.maxY, maxY = Self.mainHeight - visible.minY
+        // While Clear Dock keeps Apple's Dock hidden, room macOS still keeps for it is left over
+        // from before; only the menu bar's room along the top counts.
+        if Settings.hideSystemDock {
+            minX = whole.minX
+            maxX = whole.maxX
+            maxY = whole.maxY
+        }
         for strip in strips where strip.screen == whole {
             switch strip.edge {
             case .top: minY = max(minY, strip.line)

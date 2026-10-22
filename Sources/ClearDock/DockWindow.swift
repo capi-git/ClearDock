@@ -179,6 +179,10 @@ final class DockController {
     /// How much of the dock's screen edge Apple's Dock is taking up, when it is set to stay
     /// visible there (for example after "Hide the macOS Dock" is turned off). Zero otherwise.
     private func appleDockInset(on screen: NSScreen) -> CGFloat {
+        // While Clear Dock keeps Apple's Dock hidden, any room macOS still keeps for it is left over
+        // from before: when the Dock is put back and hidden again (Clear Dock quitting and opening),
+        // macOS can go on keeping the room the visible Dock had.
+        if Settings.hideSystemDock { return 0 }
         let reserved: CGFloat = switch edge {
         case .bottom: screen.visibleFrame.minY - screen.frame.minY
         case .left: screen.visibleFrame.minX - screen.frame.minX
