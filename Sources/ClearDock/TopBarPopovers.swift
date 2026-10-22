@@ -11,7 +11,6 @@ final class BarPopover {
     private var hideWork: DispatchWorkItem?
     /// What's showing, such as "song" or "desktop-…".
     private(set) var showing: String?
-    private var inBarSpace = false
 
     init() {
         panel.onEnter = { [weak self] in self?.hideWork?.cancel() }
@@ -57,10 +56,8 @@ final class BarPopover {
         if showing == nil {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
-            if !inBarSpace {
-                BarSpace.add(panel)
-                inBarSpace = true
-            }
+            // Each time: a window put away leaves the layer, and would slide with desktop switches.
+            BarSpace.add(panel)
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.15
                 panel.animator().alphaValue = 1
@@ -319,9 +316,20 @@ final class PeekShots: ObservableObject {
         wallpaper = image
     }
 
+    /// The system's list of windows to take pictures of, kept for a few seconds: pointing along
+    /// the desktops one after another needn't ask for it each time.
+    private static var shareable: (content: SCShareableContent, taken: Date)?
+
     func load(_ windows: [DesktopWindow], scale: CGFloat) async {
-        guard CGPreflightScreenCaptureAccess(), !windows.isEmpty,
-              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) else { return }
+        guard CGPreflightScreenCaptureAccess(), !windows.isEmpty else { return }
+        let content: SCShareableContent
+        if let kept = Self.shareable, Date().timeIntervalSince(kept.taken) < 4 {
+            content = kept.content
+        } else {
+            guard let fresh = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) else { return }
+            Self.shareable = (fresh, Date())
+            content = fresh
+        }
         for window in windows.prefix(8) {
             guard !Task.isCancelled, let match = content.windows.first(where: { $0.windowID == window.id }) else { continue }
             let config = SCStreamConfiguration()

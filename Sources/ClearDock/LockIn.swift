@@ -57,6 +57,10 @@ final class LockIn {
     /// When each locked-in desktop was locked in, by its id.
     var lockedIn: [UInt64: Date] { sessions.mapValues(\.started) }
 
+    init() {
+        Self.restoreLeftovers()
+    }
+
     // MARK: Turning it on and off
 
     /// Locks in the desktop you're on, or unlocks it if it's locked in. While you're choosing the
@@ -94,6 +98,7 @@ final class LockIn {
         for windows in waiting.values { Self.unminimize(windows) }
         waiting.removeAll()
         updateWatching()
+        saveLeftovers()
     }
 
     private func lock(_ desktop: Desktop, on screen: NSScreen) {
@@ -144,11 +149,13 @@ final class LockIn {
             guard let self, let session else { return }
             self.end(session)
         }
+        session.onPutAway = { [weak self] in self?.saveLeftovers() }
         sessions[space] = session
         if BarSettings.lockInHideOthers {
             let kept = Set(picked.map(\.id))
             session.tuck(all.filter { !kept.contains($0.id) }.map(\.element))
             session.hide(apart)
+            saveLeftovers()
         }
         // First, so the dock is out of the way before the two are given the room.
         publish()
@@ -189,6 +196,7 @@ final class LockIn {
         }
         updateWatching()
         publish()
+        saveLeftovers()
     }
 
     // MARK: Keeping up with your desktops and apps
@@ -254,6 +262,57 @@ final class LockIn {
         guard let windows = waiting.removeValue(forKey: space) else { return }
         Self.unminimize(windows)
         updateWatching()
+        saveLeftovers()
+    }
+
+    // MARK: If Clear Dock stops while locked in
+
+    /// What's tucked away and hidden, written down so it can be put back if Clear Dock stops without
+    /// unlocking (a crash, or being forced to quit): with the macOS Dock hidden, minimized windows
+    /// would otherwise be hard to get back.
+    private static let leftoversKey = "lockIn.leftovers"
+
+    private func saveLeftovers() {
+        var windows: [[String: Int]] = []
+        for window in sessions.values.flatMap(\.tucked) + waiting.values.flatMap({ $0 }) {
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(window, &pid) == .success, let id = AppWindowList.windowID(of: window) else { continue }
+            windows.append(["pid": Int(pid), "window": Int(id)])
+        }
+        let apps: [[String: Any]] = sessions.values.flatMap(\.hiddenApps).compactMap { pid in
+            NSRunningApplication(processIdentifier: pid)?.bundleIdentifier.map { ["pid": Int(pid), "bundle": $0] }
+        }
+        if windows.isEmpty && apps.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.leftoversKey)
+        } else {
+            UserDefaults.standard.set(["windows": windows, "apps": apps], forKey: Self.leftoversKey)
+        }
+    }
+
+    /// Puts back what an earlier run of Clear Dock left tucked away or hidden, if it stopped while
+    /// locked in.
+    private static func restoreLeftovers() {
+        guard let saved = UserDefaults.standard.dictionary(forKey: leftoversKey) else { return }
+        UserDefaults.standard.removeObject(forKey: leftoversKey)
+        var windows: [pid_t: Set<CGWindowID>] = [:]
+        for entry in saved["windows"] as? [[String: Int]] ?? [] {
+            guard let pid = entry["pid"], let id = entry["window"] else { continue }
+            windows[pid_t(pid), default: []].insert(CGWindowID(id))
+        }
+        for (pid, ids) in windows {
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.5)
+            for window in (attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
+                guard let id = AppWindowList.windowID(of: window), ids.contains(id) else { continue }
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            }
+        }
+        for entry in saved["apps"] as? [[String: Any]] ?? [] {
+            // Only the same app: after a restart, the number may belong to another.
+            guard let pid = entry["pid"] as? Int, let bundle = entry["bundle"] as? String,
+                  let app = NSRunningApplication(processIdentifier: pid_t(pid)), app.bundleIdentifier == bundle else { continue }
+            app.unhide()
+        }
     }
 
     // MARK: Finding the windows
@@ -359,6 +418,8 @@ private final class LockInSession {
     var accent: () -> NSColor = { .systemPurple }
     /// One of the two windows closed.
     var onEnd: () -> Void = {}
+    /// It tucked away or hid something more (a window that opened meanwhile).
+    var onPutAway: () -> Void = {}
 
     /// Left, then right, each with what moves it.
     private var panes: [Pane]
@@ -640,6 +701,7 @@ private final class LockInSession {
         }
         // An app whose window was just tucked away is still the one in front: go back to the two.
         if tuckedAny { WindowFocus.raise(panes[0].id, of: panes[0].pid) }
+        onPutAway()
     }
 
     // MARK: Watching them

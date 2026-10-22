@@ -407,7 +407,8 @@ final class NowPlaying {
                 }.resume()
             }
         } else {
-            let file = FileManager.default.temporaryDirectory.appendingPathComponent("cleardock-artwork").path
+            // A file of its own each time, so covers asked for close together can't mix.
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("cleardock-artwork-\(UUID().uuidString)").path
             let script = """
                 tell application id "com.apple.Music" to set picture to raw data of artwork 1 of current track
                 set output to open for access (POSIX file "\(file)") with write permission
@@ -417,6 +418,7 @@ final class NowPlaying {
                 return "\(file)"
                 """
             Self.run(script) { [weak self] text in
+                defer { try? FileManager.default.removeItem(atPath: file) }
                 guard let text else { return }
                 self?.setArtwork(NSImage(contentsOfFile: text), for: song)
             }
@@ -499,7 +501,7 @@ final class SystemVolume {
     private var deviceListener: AudioObjectPropertyListenerBlock?
     private var valueListener: AudioObjectPropertyListenerBlock?
 
-    private static var outputAddress = AudioObjectPropertyAddress(
+    private static let outputAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
 
@@ -516,7 +518,8 @@ final class SystemVolume {
             MainActor.assumeIsolated { self?.attach() }
         }
         self.deviceListener = deviceListener
-        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &Self.outputAddress, .main, deviceListener)
+        var address = Self.outputAddress
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, deviceListener)
         valueListener = { [weak self] _, _ in
             MainActor.assumeIsolated { self?.read() }
         }
@@ -528,7 +531,8 @@ final class SystemVolume {
         running = false
         detach()
         if let deviceListener {
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &Self.outputAddress, .main, deviceListener)
+            var address = Self.outputAddress
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, deviceListener)
         }
         deviceListener = nil
         valueListener = nil
@@ -539,7 +543,8 @@ final class SystemVolume {
         detach()
         var id = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &Self.outputAddress, 0, nil, &size, &id)
+        var address = Self.outputAddress
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id)
         device = id
         if let valueListener, device != kAudioObjectUnknown {
             for selector in Self.watched {
@@ -630,6 +635,8 @@ final class BatteryStatus {
     private func read() {
         defer { onChange() }
         percent = nil
+        charging = false
+        pluggedIn = false
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return }
         for source in list {

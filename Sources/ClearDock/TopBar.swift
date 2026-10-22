@@ -198,6 +198,8 @@ final class TopBarController {
     private var clockTimer: Timer?
     private var desktopTimer: Timer?
     private var revealTimer: Timer?
+    /// The screen whose bar has stepped aside for the macOS menu bar, while the pointer is up there.
+    private var revealScreen: CGDirectDisplayID?
     private var revealStarted = Date.distantPast
     /// Watches the pointer while it's at the top of a screen, before the macOS menu bar shows.
     private var holdTimer: Timer?
@@ -420,6 +422,7 @@ final class TopBarController {
         desktopTimer = nil
         revealTimer?.invalidate()
         revealTimer = nil
+        revealScreen = nil
         endHold()
         lockIn.endAll()
         lockInPicker.close()
@@ -510,7 +513,10 @@ final class TopBarController {
                 continue
             }
 
-            panel.ignoresMouseEvents = revealTimer != nil
+            // Only the bar that's stepped aside (for the macOS menu bar, or for Mission Control) stays
+            // out of the way; the others carry on as usual.
+            let away = revealScreen == id || exposeScreens.contains(id)
+            panel.ignoresMouseEvents = away
             if wasAway {
                 // Slide back down from the top.
                 leaving.remove(id)
@@ -519,7 +525,7 @@ final class TopBarController {
                     panel.alphaValue = 0
                 }
                 panel.orderFrontRegardless()
-                Self.animate(panel, to: frame, alpha: revealTimer == nil ? 1 : 0)
+                Self.animate(panel, to: frame, alpha: away ? 0 : 1)
             } else {
                 if panel.frame != frame { panel.setFrame(frame, display: true) }
                 panel.orderFrontRegardless()
@@ -602,7 +608,7 @@ final class TopBarController {
         if open {
             panel.alphaValue = 0
             panel.ignoresMouseEvents = true
-        } else if !coveredScreens.contains(id), !fullScreenScreens.contains(id), revealTimer == nil {
+        } else if !coveredScreens.contains(id), !fullScreenScreens.contains(id), revealScreen != id {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.2
                 panel.animator().alphaValue = 1
@@ -771,6 +777,7 @@ final class TopBarController {
     private func menuBarRevealing(on id: CGDirectDisplayID) {
         guard revealTimer == nil else { return }
         revealStarted = Date()
+        revealScreen = id
         setBarsVisible(false, only: id)
         let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkMenuBarGone() }
@@ -789,6 +796,7 @@ final class TopBarController {
         if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarShowing() || Self.menuOpen() { return }
         revealTimer?.invalidate()
         revealTimer = nil
+        revealScreen = nil
         model.backdropScreens = []
         setBarsVisible(true)
     }
@@ -816,8 +824,12 @@ final class TopBarController {
     }
 
     private func setBarsVisible(_ visible: Bool, only id: CGDirectDisplayID? = nil) {
-        // Bars stepping aside for a game are left as they are.
-        let bars = panels.filter { !coveredScreens.contains($0.key) && (id == nil || $0.key == id) }.map(\.value.panel)
+        // Bars stepping aside for a game are left as they are, and none comes back over Mission
+        // Control or a full-screen app.
+        let bars = panels.filter { key, _ in
+            !coveredScreens.contains(key) && (id == nil || key == id)
+                && !(visible && (exposeScreens.contains(key) || fullScreenScreens.contains(key)))
+        }.map(\.value.panel)
         if !visible { popover.hide() }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = visible ? 0.2 : 0.1
@@ -842,8 +854,11 @@ final class TopBarController {
     /// Notices when the app in front fills a screen with a game or another full-screen window,
     /// so the bar steps aside there, and comes back once it doesn't.
     private func checkCovered() {
+        // Clear Dock itself coming forward for a moment (an alert, its settings) changes nothing:
+        // the bar shouldn't drop back over a game for it.
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() { return }
         var covered = Set<CGDirectDisplayID>()
-        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != getpid() {
+        if let front = NSWorkspace.shared.frontmostApplication {
             let pid = front.processIdentifier
             let game = Games.isGame(pid)
             let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
