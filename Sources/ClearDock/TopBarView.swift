@@ -18,10 +18,15 @@ struct TopBarView: View {
                 LinearGradient(colors: [.clear, Color(nsColor: look.accent), Color(nsColor: look.accent), .clear],
                                startPoint: .leading, endPoint: .trailing)
             } else {
-                HStack(spacing: 0) {
-                    row(.left, layout).frame(width: side, alignment: .leading)
-                    Spacer(minLength: 0)
-                    row(.right, layout).frame(width: side, alignment: .trailing)
+                // One container for the bar's glass: its pieces are drawn together in one pass, rather
+                // than each on its own, which matters most over a moving wallpaper (redrawn every frame).
+                // No spacing, so neighbouring pieces don't melt into each other.
+                GlassEffectContainer(spacing: 0) {
+                    HStack(spacing: 0) {
+                        row(.left, layout).frame(width: side, alignment: .leading)
+                        Spacer(minLength: 0)
+                        row(.right, layout).frame(width: side, alignment: .trailing)
+                    }
                 }
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
