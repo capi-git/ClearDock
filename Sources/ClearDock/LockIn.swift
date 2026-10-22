@@ -498,7 +498,8 @@ private final class LockInSession {
         // where the last mouse event said: mice and screens update at different rates, and
         // going by the events makes it lag a frame now and then and catch up.
         let overlay = DragOverlay(over: Self.flipped(area), icons: panes.map { NSRunningApplication(processIdentifier: $0.pid)?.icon },
-                                  color: accent(), glow: BarSettings.lockInBorder) { [weak self] in
+                                  color: accent(), glow: BarSettings.lockInBorder,
+                                  frostedCovers: BarSettings.lockInFrostedCovers) { [weak self] in
             guard let self, self.dividerMoved else { return nil }
             return self.split(at: NSEvent.mouseLocation.x - self.grabOffset)?.map(Self.flipped)
         }
@@ -1001,8 +1002,9 @@ private final class GlowStrip: NSPanel {
 }
 
 /// What you see while you drag the edge between the two windows: one see-through window over the
-/// lock-in space holding a frosted cover over each window (with its app's icon), their glow and the
-/// grip. Everything in it moves together, once per screen refresh, to wherever the pointer has got
+/// lock-in space holding a cover over each window (with its app's icon), their glow and the grip.
+/// Covers are plain (a tinted shape, next to no work to resize) or frosted (a live blur of what's
+/// behind, which macOS has to work out again at every size). Everything in it moves together, once per screen refresh, to wherever the pointer has got
 /// to, so the pieces never drift apart, and nothing in it asks the apps anything. Made when you
 /// take hold of the edge and let go of when you let go, so it uses no memory the rest of the time.
 @MainActor
@@ -1012,8 +1014,12 @@ final class DragOverlay: NSObject {
 
     private let panel: NSPanel
     private let origin: NSPoint
-    private var covers: [NSVisualEffectView] = []
+    /// Holds the covers, so they fade in and out together.
+    private let coverHost = NSView()
+    private var frosted: [NSVisualEffectView] = []
     private var iconViews: [NSImageView] = []
+    private var plain: [CALayer] = []
+    private var iconLayers: [CALayer] = []
     private var glows: [CAShapeLayer] = []
     private let grip = CALayer()
     /// Where the two windows go right now, asked at each refresh of the screen.
@@ -1022,7 +1028,7 @@ final class DragOverlay: NSObject {
     private var link: CADisplayLink?
 
     /// `area` is the lock-in space, in the usual bottom-up screen coordinates.
-    init(over area: NSRect, icons: [NSImage?], color: NSColor, glow: Bool, follow: @escaping () -> [NSRect]?) {
+    init(over area: NSRect, icons: [NSImage?], color: NSColor, glow: Bool, frostedCovers: Bool, follow: @escaping () -> [NSRect]?) {
         let frame = area.insetBy(dx: -Self.reach, dy: -Self.reach)
         origin = frame.origin
         self.follow = follow
@@ -1038,21 +1044,47 @@ final class DragOverlay: NSObject {
         panel.isReleasedWhenClosed = false
 
         let root = NSView(frame: NSRect(origin: .zero, size: frame.size))
-        for icon in icons {
-            let cover = NSVisualEffectView()
-            cover.material = .fullScreenUI
-            cover.blendingMode = .behindWindow
-            cover.state = .active
-            cover.maskImage = Self.mask
-            cover.alphaValue = 0
-            let iconView = NSImageView()
-            iconView.image = icon
-            iconView.imageScaling = .scaleProportionallyUpOrDown
-            cover.addSubview(iconView)
-            root.addSubview(cover)
-            covers.append(cover)
-            iconViews.append(iconView)
+        coverHost.frame = root.bounds
+        coverHost.alphaValue = 0
+        if frostedCovers {
+            for icon in icons {
+                let cover = NSVisualEffectView()
+                cover.material = .fullScreenUI
+                cover.blendingMode = .behindWindow
+                cover.state = .active
+                cover.maskImage = Self.mask
+                let iconView = NSImageView()
+                iconView.image = icon
+                iconView.imageScaling = .scaleProportionallyUpOrDown
+                cover.addSubview(iconView)
+                coverHost.addSubview(cover)
+                frosted.append(cover)
+                iconViews.append(iconView)
+            }
+        } else {
+            coverHost.layer = CALayer()
+            coverHost.wantsLayer = true
+            // Dark, with a hint of the highlight colour, like the glow round it.
+            let tint = (NSColor(white: 0.1, alpha: 1).blended(withFraction: 0.18, of: color) ?? .black).withAlphaComponent(0.95)
+            let scale = NSScreen.screens.first { $0.frame.intersects(frame) }?.backingScaleFactor ?? 2
+            for icon in icons {
+                let cover = CALayer()
+                cover.backgroundColor = tint.cgColor
+                cover.cornerRadius = GlowFrame.cornerRadius
+                cover.cornerCurve = .continuous
+                cover.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+                cover.borderWidth = 1
+                let iconLayer = CALayer()
+                iconLayer.contents = icon
+                iconLayer.contentsGravity = .resizeAspect
+                iconLayer.contentsScale = scale
+                cover.addSublayer(iconLayer)
+                coverHost.layer?.addSublayer(cover)
+                plain.append(cover)
+                iconLayers.append(iconLayer)
+            }
         }
+        root.addSubview(coverHost)
         // The glow and the grip, above the covers.
         let top = NSView(frame: root.bounds)
         top.layer = CALayer()
@@ -1080,7 +1112,7 @@ final class DragOverlay: NSObject {
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.1
-            covers.forEach { $0.animator().alphaValue = 1 }
+            coverHost.animator().alphaValue = 1
         }
         // In step with the screen's refreshes.
         let link = root.displayLink(target: self, selector: #selector(step(_:)))
@@ -1104,7 +1136,7 @@ final class DragOverlay: NSObject {
         let panel = self.panel
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.15
-            covers.forEach { $0.animator().alphaValue = 0 }
+            coverHost.animator().alphaValue = 0
         } completionHandler: {
             MainActor.assumeIsolated { panel.close() }
         }
@@ -1118,10 +1150,17 @@ final class DragOverlay: NSObject {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let local = frames.map { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
-        for (index, frame) in local.enumerated() where index < covers.count {
-            covers[index].frame = frame
+        for (index, frame) in local.enumerated() where index < 2 {
             let side = min(84, frame.width * 0.4, frame.height * 0.4)
-            iconViews[index].frame = NSRect(x: (frame.width - side) / 2, y: (frame.height - side) / 2, width: side, height: side)
+            let icon = NSRect(x: (frame.width - side) / 2, y: (frame.height - side) / 2, width: side, height: side)
+            if index < frosted.count {
+                frosted[index].frame = frame
+                iconViews[index].frame = icon
+            }
+            if index < plain.count {
+                plain[index].frame = frame
+                iconLayers[index].frame = icon
+            }
             if index < glows.count {
                 let outset = GlowFrame.lineWidth / 2 + 1
                 let radius = GlowFrame.cornerRadius + outset

@@ -276,7 +276,14 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "lockIn.hideOthers") }
     }
 
-    /// A glowing edge around the one you're using.
+    /// While you drag the edge between the two: frosted covers over them (a live blur of what's
+    /// behind), or plain ones (a tinted shape, lighter on the Mac and smoother).
+    static var lockInFrostedCovers: Bool {
+        get { defaults.bool(forKey: "lockIn.frostedCovers") }
+        set { defaults.set(newValue, forKey: "lockIn.frostedCovers") }
+    }
+
+    /// A glowing edge around both apps.
     static var lockInBorder: Bool {
         get { defaults.object(forKey: "lockIn.border") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "lockIn.border") }

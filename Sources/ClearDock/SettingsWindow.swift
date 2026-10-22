@@ -180,6 +180,7 @@ final class SettingsStore: ObservableObject {
     @Published var lockInHideOthers = true { didSet { barEdit { BarSettings.lockInHideOthers = lockInHideOthers } } }
     @Published var lockInBorder = true { didSet { barEdit { BarSettings.lockInBorder = lockInBorder } } }
     @Published var lockInGap = 12.0 { didSet { barEdit { BarSettings.lockInGap = lockInGap } } }
+    @Published var lockInFrostedCovers = false { didSet { barEdit { BarSettings.lockInFrostedCovers = lockInFrostedCovers } } }
 
     /// Your desktops, for naming and colouring them. Read when the Desktops tab is shown.
     struct DesktopRow: Identifiable {
@@ -334,6 +335,7 @@ final class SettingsStore: ObservableObject {
         lockInHideOthers = BarSettings.lockInHideOthers
         lockInBorder = BarSettings.lockInBorder
         lockInGap = BarSettings.lockInGap
+        lockInFrostedCovers = BarSettings.lockInFrostedCovers
         if !desktopRows.isEmpty { loadDesktops() }
         loading = false
     }
@@ -822,6 +824,11 @@ private struct DesktopsTab: View {
                 Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
                 Toggle("Tuck away the other windows", isOn: $store.lockInHideOthers)
                 Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
+                Picker("While dragging the edge", selection: $store.lockInFrostedCovers) {
+                    Text("Plain").tag(false)
+                    Text("Frosted").tag(true)
+                }
+                .pickerStyle(.segmented)
             } header: {
                 Text("Lock-in mode")
             } footer: {
