@@ -244,8 +244,10 @@ enum OnScreenWindows {
     private static let create: ListCreate? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreate")
         .map { unsafeBitCast($0, to: ListCreate.self) }
 
-    static func numbers() -> [UInt] {
-        guard let create, let list = create(CGWindowListOption.optionOnScreenOnly.rawValue, 0)?.takeRetainedValue() else { return [] }
+    /// On screen, or with `everywhere`, on every desktop too.
+    static func numbers(everywhere: Bool = false) -> [UInt] {
+        let option: CGWindowListOption = everywhere ? .optionAll : .optionOnScreenOnly
+        guard let create, let list = create(option.rawValue, 0)?.takeRetainedValue() else { return [] }
         return (0..<CFArrayGetCount(list)).map { UInt(bitPattern: CFArrayGetValueAtIndex(list, $0)) }
     }
 }

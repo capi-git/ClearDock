@@ -225,6 +225,8 @@ final class TopBarController {
     private let lockIn = LockIn()
     /// The windows on screen at the last look for Mission Control.
     private var onScreenNumbers: [UInt] = []
+    /// Every window, on every desktop, at the last regular look.
+    private var allWindowNumbers: [UInt] = []
     private let lockInPicker = LockInPicker()
 
     init() {
@@ -391,8 +393,14 @@ final class TopBarController {
 
         let desktops = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.refreshDesktops()
-                self?.checkCovered()
+                guard let self else { return }
+                // A safety net for changes nothing announces (a window opening, closing or moving to
+                // another desktop): only worth a full look when the windows have changed.
+                let numbers = OnScreenWindows.numbers(everywhere: true)
+                guard numbers != self.allWindowNumbers else { return }
+                self.allWindowNumbers = numbers
+                self.refreshDesktops()
+                self.checkCovered()
             }
         }
         desktops.tolerance = 2
