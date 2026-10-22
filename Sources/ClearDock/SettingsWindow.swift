@@ -9,8 +9,8 @@ import UniformTypeIdentifiers
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
-    /// Called whenever a setting changes, so the dock can redraw.
-    var onChange: () -> Void = {}
+    /// Called when settings change, with which part of Clear Dock they're for, so only that part redraws.
+    var onChange: (SettingsArea) -> Void = { _ in }
     /// Called with true when the window opens and false when it closes.
     var onOpenChanged: (Bool) -> Void = { _ in }
 
@@ -19,10 +19,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     func show(tab: SettingsTab? = nil) {
         if window == nil {
-            let store = SettingsStore(onChange: { [weak self] in self?.onChange() })
+            let store = SettingsStore(onChange: { [weak self] area in self?.onChange(area) })
             self.store = store
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
+                contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered, defer: false)
             window.title = "Clear Dock"
@@ -49,29 +49,35 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+/// Which part of Clear Dock a setting is for.
+enum SettingsArea: Hashable {
+    case dock, bar
+}
+
 enum SettingsTab: String, Hashable {
-    case look, topBar, behaviour, permissions, about
+    case dock = "behaviour", look, topBar, desktops, general = "permissions"
 }
 
 /// The settings, as the window shows and edits them.
 @MainActor
 final class SettingsStore: ObservableObject {
-    private let changed: () -> Void
+    private let changed: (SettingsArea) -> Void
     private var pending: DispatchWorkItem?
+    private var pendingAreas = Set<SettingsArea>()
     /// Set while values are being loaded, so loading doesn't count as an edit.
     private var loading = true
 
-    init(onChange: @escaping () -> Void) {
+    init(onChange: @escaping (SettingsArea) -> Void) {
         changed = onChange
         reload()
     }
 
     /// The window opens on the tab you last used.
-    @Published var tab = UserDefaults.standard.string(forKey: "settingsTab").flatMap(SettingsTab.init(rawValue:)) ?? .look {
+    @Published var tab = UserDefaults.standard.string(forKey: "settingsTab").flatMap(SettingsTab.init(rawValue:)) ?? .dock {
         didSet { UserDefaults.standard.set(tab.rawValue, forKey: "settingsTab") }
     }
 
-    // Look
+    // Dock look
     @Published var theme: String?
     @Published var themes: [DockTheme] = []
     @Published var background = DockBackground.none { didSet { edit { Appearance.background = background } } }
@@ -79,12 +85,17 @@ final class SettingsStore: ObservableObject {
     @Published var backgroundOpacity = 0.5 { didSet { edit { Appearance.backgroundOpacity = backgroundOpacity } } }
     @Published var cornerRadius = 18.0 { didSet { edit { Appearance.cornerRadius = cornerRadius } } }
     @Published var finish = BarFinish.flat { didSet { edit { Appearance.finish = finish } } }
-    @Published var outline = true { didSet { edit { Appearance.outline = outline } } }
-    @Published var customOutline = false {
-        didSet { edit { Appearance.outlineColor = customOutline ? NSColor(outlineColor) : nil } }
+    /// The outline round the dock's background: none, a soft automatic one, or a colour of your choosing.
+    @Published var outline = OutlineChoice.automatic {
+        didSet {
+            edit {
+                Appearance.outline = outline != .none
+                Appearance.outlineColor = outline == .colour ? NSColor(outlineColor) : nil
+            }
+        }
     }
     @Published var outlineColor = Color.white {
-        didSet { edit { if customOutline { Appearance.outlineColor = NSColor(outlineColor) } } }
+        didSet { edit { if outline == .colour { Appearance.outlineColor = NSColor(outlineColor) } } }
     }
     @Published var iconStyle = IconStyle.original { didSet { edit { Appearance.iconStyle = iconStyle } } }
     @Published var iconShape = IconShape.original { didSet { edit { Appearance.iconShape = iconShape } } }
@@ -105,7 +116,7 @@ final class SettingsStore: ObservableObject {
     @Published var spacing = 1.0 { didSet { edit(keepsTheme: true) { Appearance.spacing = spacing } } }
     @Published var iconSize = 40.0 { didSet { edit(keepsTheme: true) { Settings.iconSize = iconSize } } }
 
-    // Behaviour
+    // Dock
     @Published var autoHide = true { didSet { edit(keepsTheme: true) { Settings.autoHide = autoHide } } }
     @Published var showPinned = false { didSet { edit(keepsTheme: true) { Settings.showPinned = showPinned } } }
     @Published var showTrash = true { didSet { edit(keepsTheme: true) { Settings.showTrash = showTrash } } }
@@ -135,11 +146,11 @@ final class SettingsStore: ObservableObject {
     }
 
     // Top bar
-    @Published var barEnabled = false { didSet { edit(keepsTheme: true) { BarSettings.enabled = barEnabled } } }
-    @Published var barAllScreens = true { didSet { edit(keepsTheme: true) { BarSettings.allScreens = barAllScreens } } }
+    @Published var barEnabled = false { didSet { barEdit { BarSettings.enabled = barEnabled } } }
+    @Published var barAllScreens = true { didSet { barEdit { BarSettings.allScreens = barAllScreens } } }
     @Published var barReplacesMenuBar = false {
         didSet {
-            edit(keepsTheme: true) { BarSettings.replaceMenuBar = barReplacesMenuBar }
+            barEdit { BarSettings.replaceMenuBar = barReplacesMenuBar }
             // Show whether macOS allowed it once the change has been made.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 MainActor.assumeIsolated { self?.refreshStatus() }
@@ -147,33 +158,30 @@ final class SettingsStore: ObservableObject {
         }
     }
     @Published var menuBarRefused = false
-    @Published var barItems: [BarItem] = [] { didSet { edit(keepsTheme: true) { BarSettings.items = barItems } } }
-    @Published var barStyle = BarStyle.wallpaper { didSet { edit(keepsTheme: true) { BarSettings.style = barStyle } } }
-    @Published var barColor = Color.black { didSet { edit(keepsTheme: true) { BarSettings.color = NSColor(barColor) } } }
-    @Published var barOpacity = 0.62 { didSet { edit(keepsTheme: true) { BarSettings.opacity = barOpacity } } }
-    @Published var barAccentIndex = 0 { didSet { edit(keepsTheme: true) { BarSettings.accentIndex = barAccentIndex } } }
-    @Published var barAccentColor = Color.blue {
-        didSet { edit(keepsTheme: true) { BarSettings.accentColor = NSColor(barAccentColor) } }
-    }
-    @Published var barSize = BarSize.medium { didSet { edit(keepsTheme: true) { BarSettings.size = barSize } } }
-    @Published var barFont = BarFont.rounded { didSet { edit(keepsTheme: true) { BarSettings.font = barFont } } }
-    @Published var barCornerRadius = 9.0 { didSet { edit(keepsTheme: true) { BarSettings.cornerRadius = barCornerRadius } } }
-    @Published var barShowDate = true { didSet { edit(keepsTheme: true) { BarSettings.showDate = barShowDate } } }
-    @Published var barUse24Hour = false { didSet { edit(keepsTheme: true) { BarSettings.use24Hour = barUse24Hour } } }
-    @Published var desktopStyle = DesktopStyle.separate { didSet { edit(keepsTheme: true) { BarSettings.desktopStyle = desktopStyle } } }
-    @Published var numberPerScreen = false { didSet { edit(keepsTheme: true) { BarSettings.numberPerScreen = numberPerScreen } } }
-    @Published var peekDesktops = true { didSet { edit(keepsTheme: true) { BarSettings.peekDesktops = peekDesktops } } }
-    @Published var albumColours = true { didSet { edit(keepsTheme: true) { BarSettings.albumColours = albumColours } } }
-    @Published var miniPlayer = true { didSet { edit(keepsTheme: true) { BarSettings.miniPlayer = miniPlayer } } }
-    @Published var gameMode = GameMode.slide { didSet { edit(keepsTheme: true) { BarSettings.gameMode = gameMode } } }
-    @Published var menuBarDelay = 1.0 { didSet { edit(keepsTheme: true) { BarSettings.menuBarDelay = menuBarDelay } } }
+    @Published var barItems: [BarItem] = [] { didSet { barEdit { BarSettings.items = barItems } } }
+    @Published var barStyle = BarStyle.wallpaper { didSet { barEdit { BarSettings.style = barStyle } } }
+    @Published var barColor = Color.black { didSet { barEdit { BarSettings.color = NSColor(barColor) } } }
+    @Published var barOpacity = 0.62 { didSet { barEdit { BarSettings.opacity = barOpacity } } }
+    @Published var barAccentIndex = 0 { didSet { barEdit { BarSettings.accentIndex = barAccentIndex } } }
+    @Published var barAccentColor = Color.blue { didSet { barEdit { BarSettings.accentColor = NSColor(barAccentColor) } } }
+    @Published var barSize = BarSize.medium { didSet { barEdit { BarSettings.size = barSize } } }
+    @Published var barFont = BarFont.rounded { didSet { barEdit { BarSettings.font = barFont } } }
+    @Published var barCornerRadius = 9.0 { didSet { barEdit { BarSettings.cornerRadius = barCornerRadius } } }
+    @Published var barShowDate = true { didSet { barEdit { BarSettings.showDate = barShowDate } } }
+    @Published var barUse24Hour = false { didSet { barEdit { BarSettings.use24Hour = barUse24Hour } } }
+    @Published var desktopStyle = DesktopStyle.separate { didSet { barEdit { BarSettings.desktopStyle = desktopStyle } } }
+    @Published var peekDesktops = true { didSet { barEdit { BarSettings.peekDesktops = peekDesktops } } }
+    @Published var albumColours = true { didSet { barEdit { BarSettings.albumColours = albumColours } } }
+    @Published var miniPlayer = true { didSet { barEdit { BarSettings.miniPlayer = miniPlayer } } }
+    @Published var gameMode = GameMode.slide { didSet { barEdit { BarSettings.gameMode = gameMode } } }
+    @Published var menuBarDelay = 1.0 { didSet { barEdit { BarSettings.menuBarDelay = menuBarDelay } } }
 
     // Lock-in mode
-    @Published var lockInHideOthers = true { didSet { edit(keepsTheme: true) { BarSettings.lockInHideOthers = lockInHideOthers } } }
-    @Published var lockInBorder = true { didSet { edit(keepsTheme: true) { BarSettings.lockInBorder = lockInBorder } } }
-    @Published var lockInGap = 12.0 { didSet { edit(keepsTheme: true) { BarSettings.lockInGap = lockInGap } } }
+    @Published var lockInHideOthers = true { didSet { barEdit { BarSettings.lockInHideOthers = lockInHideOthers } } }
+    @Published var lockInBorder = true { didSet { barEdit { BarSettings.lockInBorder = lockInBorder } } }
+    @Published var lockInGap = 12.0 { didSet { barEdit { BarSettings.lockInGap = lockInGap } } }
 
-    /// Your desktops, for naming and colouring them.
+    /// Your desktops, for naming and colouring them. Read when the Desktops tab is shown.
     struct DesktopRow: Identifiable {
         let id: String
         let number: Int
@@ -185,10 +193,11 @@ final class SettingsStore: ObservableObject {
     func setDesktopName(_ key: String, _ name: String) {
         var names = BarSettings.desktopNames
         let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard names[key] != (trimmed.isEmpty ? nil : trimmed) else { return }
         names[key] = trimmed.isEmpty ? nil : trimmed
         BarSettings.desktopNames = names
-        if let index = desktopRows.firstIndex(where: { $0.id == key }) { desktopRows[index].name = name }
-        edit(keepsTheme: true) {}
+        if let index = desktopRows.firstIndex(where: { $0.id == key }) { desktopRows[index].name = trimmed }
+        barEdit {}
     }
 
     func setDesktopColour(_ key: String, _ colour: DesktopColour?) {
@@ -196,10 +205,10 @@ final class SettingsStore: ObservableObject {
         colours[key] = colour
         BarSettings.desktopColours = colours
         if let index = desktopRows.firstIndex(where: { $0.id == key }) { desktopRows[index].colour = colour }
-        edit(keepsTheme: true) {}
+        barEdit {}
     }
 
-    private func loadDesktops() {
+    func loadDesktops() {
         let names = BarSettings.desktopNames
         let colours = BarSettings.desktopColours
         desktopRows = DesktopReader.read().values.flatMap { $0 }.sorted { $0.number < $1.number }.map {
@@ -207,7 +216,7 @@ final class SettingsStore: ObservableObject {
         }
     }
     @Published var menuBarHidden = false
-    @Published var desktopShortcutsOn = false
+    @Published var desktopShortcutsOn = true
     @Published var wallpaperAccents: [Color] = []
 
     func moveBarItem(_ item: BarItem, by offset: Int) {
@@ -241,7 +250,7 @@ final class SettingsStore: ObservableObject {
         icons[id] = nil
         Settings.customIcons = icons
         loadCustomIcons()
-        changed()
+        changed(.dock)
     }
 
     private func loadCustomIcons() {
@@ -268,8 +277,7 @@ final class SettingsStore: ObservableObject {
         backgroundOpacity = Appearance.backgroundOpacity
         cornerRadius = Appearance.cornerRadius
         finish = Appearance.finish
-        outline = Appearance.outline
-        customOutline = Appearance.outlineColor != nil
+        outline = !Appearance.outline ? .none : Appearance.outlineColor == nil ? .automatic : .colour
         outlineColor = Color(nsColor: Appearance.outlineColor ?? .white)
         iconStyle = Appearance.iconStyle
         iconShape = Appearance.iconShape
@@ -294,6 +302,15 @@ final class SettingsStore: ObservableObject {
         clickToHide = Settings.clickToHide
         hideSystemDock = Settings.hideSystemDock
         openAtLogin = LoginItem.isEnabled
+        loadCustomIcons()
+        loading = false
+        reloadBar()
+        refreshStatus()
+    }
+
+    /// Just the top bar's settings: they also change from the bar's own menus.
+    func reloadBar() {
+        loading = true
         barEnabled = BarSettings.enabled
         barAllScreens = BarSettings.allScreens
         barReplacesMenuBar = BarSettings.replaceMenuBar
@@ -309,7 +326,6 @@ final class SettingsStore: ObservableObject {
         barShowDate = BarSettings.showDate
         barUse24Hour = BarSettings.use24Hour
         desktopStyle = BarSettings.desktopStyle
-        numberPerScreen = BarSettings.numberPerScreen
         peekDesktops = BarSettings.peekDesktops
         albumColours = BarSettings.albumColours
         miniPlayer = BarSettings.miniPlayer
@@ -318,14 +334,11 @@ final class SettingsStore: ObservableObject {
         lockInHideOthers = BarSettings.lockInHideOthers
         lockInBorder = BarSettings.lockInBorder
         lockInGap = BarSettings.lockInGap
-        loadDesktops()
-        loadCustomIcons()
-        refreshStatus()
+        if !desktopRows.isEmpty { loadDesktops() }
         loading = false
     }
 
     func refreshStatus() {
-        loadCustomIcons()
         hasAccessibility = AXIsProcessTrusted()
         hasScreenRecording = CGPreflightScreenCaptureAccess()
         wallpaperBase = Color(nsColor: WallpaperPalette.shared.base)
@@ -339,7 +352,7 @@ final class SettingsStore: ObservableObject {
     func apply(_ theme: DockTheme) {
         theme.apply()
         reload()
-        changed()
+        changed(.dock)
     }
 
     func saveTheme(named name: String) {
@@ -378,7 +391,7 @@ final class SettingsStore: ObservableObject {
         do {
             try DockTheme.importTheme(from: url)
             reload()
-            changed()
+            changed(.dock)
         } catch {
             let alert = NSAlert()
             alert.messageText = "That file isn't a Clear Dock theme."
@@ -386,7 +399,7 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// Saves a change and redraws the dock shortly after; sliders send many small changes,
+    /// Saves a change to the dock and redraws it shortly after; sliders send many small changes,
     /// so they're gathered into one redraw.
     private func edit(keepsTheme: Bool = false, _ save: () -> Void) {
         guard !loading else { return }
@@ -395,12 +408,41 @@ final class SettingsStore: ObservableObject {
             Appearance.theme = nil
             theme = nil
         }
+        schedule(.dock)
+    }
+
+    /// The same for the top bar (and lock-in mode), which redraws on its own.
+    private func barEdit(_ save: () -> Void) {
+        guard !loading else { return }
+        save()
+        schedule(.bar)
+    }
+
+    private func schedule(_ area: SettingsArea) {
+        pendingAreas.insert(area)
         pending?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.changed() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let areas = self.pendingAreas
+                self.pendingAreas.removeAll()
+                areas.forEach(self.changed)
+            }
         }
         pending = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+}
+
+enum OutlineChoice: String, CaseIterable, Identifiable {
+    case none, automatic, colour
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .none: "None"
+        case .automatic: "Soft"
+        case .colour: "Colour"
+        }
     }
 }
 
@@ -411,23 +453,23 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $store.tab) {
+            DockTab(store: store)
+                .tabItem { Label("Dock", systemImage: "dock.rectangle") }
+                .tag(SettingsTab.dock)
             LookTab(store: store)
-                .tabItem { Label("Look", systemImage: "paintpalette") }
+                .tabItem { Label("Dock Look", systemImage: "paintpalette") }
                 .tag(SettingsTab.look)
             TopBarTab(store: store)
                 .tabItem { Label("Top Bar", systemImage: "menubar.rectangle") }
                 .tag(SettingsTab.topBar)
-            BehaviourTab(store: store)
-                .tabItem { Label("Behaviour", systemImage: "slider.horizontal.3") }
-                .tag(SettingsTab.behaviour)
-            PermissionsTab(store: store)
-                .tabItem { Label("Permissions", systemImage: "lock.shield") }
-                .tag(SettingsTab.permissions)
-            AboutTab()
-                .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(SettingsTab.about)
+            DesktopsTab(store: store)
+                .tabItem { Label("Desktops", systemImage: "square.split.2x2") }
+                .tag(SettingsTab.desktops)
+            GeneralTab(store: store)
+                .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsTab.general)
         }
-        .frame(width: 640, height: 620)
+        .frame(width: 620, height: 600)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refreshStatus()
         }
@@ -436,8 +478,49 @@ struct SettingsView: View {
         }
         // The top bar's own menus change its settings too; show those changes here.
         .onReceive(NotificationCenter.default.publisher(for: BarSettings.didChange)) { _ in
-            store.reload()
+            store.reloadBar()
         }
+    }
+}
+
+/// A short note under a section.
+private struct Note: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+private struct DockTab: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        Form {
+            Section("Where it sits") {
+                Picker("Position", selection: $store.position) {
+                    ForEach(DockEdge.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Hide until the pointer reaches the edge", isOn: $store.autoHide)
+                Toggle("Hide the macOS Dock", isOn: $store.hideSystemDock)
+            }
+            Section("What it shows") {
+                Toggle("Apps pinned in the macOS Dock", isOn: $store.showPinned)
+                Toggle("Trash", isOn: $store.showTrash)
+                Toggle("Notification badges", isOn: $store.showBadges)
+            }
+            Section {
+                Toggle("Window previews when pointing at an app", isOn: $store.showPreviews)
+                Toggle("Scroll up on an icon to show its windows", isOn: $store.scrollToOpen)
+                Toggle("Click the app you're using to hide it", isOn: $store.clickToHide)
+            } header: {
+                Text("Pointing and clicking")
+            } footer: {
+                Note("⌘-click shows an app in Finder, ⌥-click switches and hides the app you were using, and dragging an icon sideways moves it.")
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
@@ -446,11 +529,11 @@ private struct LookTab: View {
     @State private var naming = false
     @State private var newName = ""
 
-    private let columns = Array(repeating: GridItem(.fixed(108), spacing: 8), count: 5)
+    private let columns = Array(repeating: GridItem(.fixed(104), spacing: 8), count: 5)
 
     var body: some View {
         Form {
-            Section("Themes") {
+            Section {
                 LazyVGrid(columns: columns, alignment: .center, spacing: 12) {
                     ForEach(store.themes) { theme in
                         ThemeCard(theme: theme, selected: store.theme == theme.id,
@@ -465,31 +548,31 @@ private struct LookTab: View {
                     }
                 }
                 .padding(.vertical, 4)
+            } header: {
                 HStack {
-                    Button("Import…") { store.importTheme() }
-                    Button("Export…") { store.exportTheme() }
+                    Text("Themes")
                     Spacer()
-                    Button("Save Current Look as Theme…") {
-                        newName = ""
-                        naming = true
+                    Menu("More") {
+                        Button("Save Current Look as Theme…") {
+                            newName = ""
+                            naming = true
+                        }
+                        Button("Import Theme…") { store.importTheme() }
+                        Button("Export Theme…") { store.exportTheme() }
                     }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-                Text("Right-click one of your own themes to delete it. Exported themes are small files you can share.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Icons") {
-                Picker("Theme", selection: $store.iconStyle) {
+                Picker("Style", selection: $store.iconStyle) {
                     ForEach(IconStyle.allCases) { Text($0.title).tag($0) }
                 }
                 Picker("Shape", selection: $store.iconShape) {
                     ForEach(IconShape.allCases) { Text($0.title).tag($0) }
                 }
-                Slider(value: $store.iconSize, in: 24...96, step: 1) { Text("Size") } minimumValueLabel: {
-                    Image(systemName: "app").imageScale(.small)
-                } maximumValueLabel: {
-                    Image(systemName: "app").imageScale(.large)
-                }
+                Slider(value: $store.iconSize, in: 24...96, step: 1) { Text("Size") }
                 Slider(value: $store.spacing, in: 0.3...2.5) { Text("Spacing") }
                 Picker("When pointed at", selection: $store.hoverEffect) {
                     ForEach(HoverEffect.allCases) { Text($0.title).tag($0) }
@@ -499,7 +582,7 @@ private struct LookTab: View {
                     Slider(value: $store.magnifyScale, in: 1.2...2.2) { Text("Magnification") }
                 }
                 Toggle("Shadows", isOn: $store.shadows)
-                Slider(value: $store.edgeGap, in: 0...40, step: 1) { Text("Distance from edge") }
+                Slider(value: $store.edgeGap, in: 0...40, step: 1) { Text("Distance from the edge") }
             }
 
             Section("Background") {
@@ -509,9 +592,9 @@ private struct LookTab: View {
                 .pickerStyle(.segmented)
                 if store.background == .color {
                     ColorPicker("Colour", selection: $store.backgroundColor, supportsOpacity: false)
-                    Toggle("Gradient", isOn: $store.useGradient)
+                    Toggle("Fade into a second colour", isOn: $store.useGradient)
                     if store.useGradient {
-                        ColorPicker("Fades into", selection: $store.gradientColor, supportsOpacity: false)
+                        ColorPicker("Second colour", selection: $store.gradientColor, supportsOpacity: false)
                     }
                 }
                 if store.background == .wallpaper {
@@ -528,27 +611,38 @@ private struct LookTab: View {
                         ForEach(BarFinish.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    Toggle("Outline", isOn: $store.outline)
-                    if store.outline {
-                        Toggle("Choose outline colour", isOn: $store.customOutline)
-                        if store.customOutline {
-                            ColorPicker("Outline colour", selection: $store.outlineColor, supportsOpacity: false)
-                        }
+                    Picker("Outline", selection: $store.outline) {
+                        ForEach(OutlineChoice.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    if store.outline == .colour {
+                        ColorPicker("Outline colour", selection: $store.outlineColor, supportsOpacity: false)
                     }
                 }
                 if store.background != .none {
                     Slider(value: $store.cornerRadius, in: 0...30) { Text("Corner rounding") }
                 }
-                if store.background == .glass {
-                    Text("Glass blurs what's behind the dock, which uses a little graphics power while the dock is showing.")
-                        .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Open apps") {
+                Picker("Mark", selection: $store.markerStyle) {
+                    ForEach(MarkerStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                if store.markerStyle != .none {
+                    Picker("Colour", selection: $store.markerColor) {
+                        ForEach(MarkerColor.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    if store.markerColor == .custom {
+                        ColorPicker("Mark colour", selection: $store.markerCustomColor, supportsOpacity: false)
+                    }
                 }
             }
 
-            Section("Your app icons") {
+            Section {
                 if store.customIcons.isEmpty {
-                    Text("Right-click any app in the dock and choose Change Icon… to use your own picture. Your icon theme is still applied on top.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    Note("Right-click an app in the dock and choose Change Icon… to use your own picture.")
                 } else {
                     ForEach(store.customIcons) { icon in
                         HStack {
@@ -560,21 +654,8 @@ private struct LookTab: View {
                         }
                     }
                 }
-            }
-
-            Section("Open apps") {
-                Picker("Mark", selection: $store.markerStyle) {
-                    ForEach(MarkerStyle.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                Picker("Colour", selection: $store.markerColor) {
-                    ForEach(MarkerColor.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .disabled(store.markerStyle == .none)
-                if store.markerColor == .custom && store.markerStyle != .none {
-                    ColorPicker("Mark colour", selection: $store.markerCustomColor, supportsOpacity: false)
-                }
+            } header: {
+                Text("Your own icons")
             }
         }
         .formStyle(.grouped)
@@ -583,7 +664,7 @@ private struct LookTab: View {
             Button("Save") { store.saveTheme(named: newName) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It saves the current background, icon theme, shape and marks.")
+            Text("It saves the current background, icon style, shape and marks.")
         }
     }
 }
@@ -600,9 +681,9 @@ private struct TopBarTab: View {
                 Toggle("Replace the macOS menu bar", isOn: $store.barReplacesMenuBar)
                     .disabled(!store.barEnabled)
                 if store.barReplacesMenuBar {
-                    LabeledContent("Hold at the top to show macOS menus") {
+                    LabeledContent("Hold at the top for macOS menus") {
                         HStack {
-                            Slider(value: $store.menuBarDelay, in: 0.2...3, step: 0.1).frame(width: 180)
+                            Slider(value: $store.menuBarDelay, in: 0.2...3, step: 0.1).frame(width: 160)
                             Text(String(format: "%.1f s", store.menuBarDelay)).monospacedDigit().foregroundStyle(.secondary)
                         }
                     }
@@ -613,8 +694,7 @@ private struct TopBarTab: View {
                     }
                 }
             } footer: {
-                Text("Replacing the menu bar sets it to hide itself; hold the pointer at the very top of the screen to get the macOS menus. It comes back when the top bar is off or Clear Dock quits. The first time, macOS asks you to let Clear Dock control System Events, which is how it changes that setting. Otherwise the top bar sits under the menu bar. It leaves room for the camera notch and for notch apps like Vorssaint.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Note("The macOS menu bar comes back when the top bar is off or Clear Dock quits.")
             }
 
             Section {
@@ -631,8 +711,7 @@ private struct TopBarTab: View {
                     Button("Reset") { store.resetBarItems() }.controlSize(.small)
                 }
             } footer: {
-                Text("Each side reads left to right in this order. Right-click anything in the bar to hide it or change it.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Note("Right-click anything in the bar to hide it or change it.")
             }
 
             Section("Look") {
@@ -679,30 +758,9 @@ private struct TopBarTab: View {
                 Slider(value: $store.barCornerRadius, in: 0...15) { Text("Corner rounding") }
             }
 
-            Section {
-                Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
-                Toggle("Tuck away other windows on the lock-in desktop", isOn: $store.lockInHideOthers)
-                Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
-            } header: {
-                Text("Lock-in mode")
-            } footer: {
-                Text("Click Lock In in the bar to lock in the desktop you're on. With two apps there, they go side by side straight away; with more, you choose which two, and the rest are tucked away (minimized) until you unlock. Drag the edge between them to share the screen differently, or drag one onto the other's side to swap them. Each desktop locks in on its own, and your other desktops are left alone. Click Lock In again on that desktop to unlock.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
             Section("Song playing") {
                 Toggle("Colours from the album cover", isOn: $store.albumColours)
-                Toggle("Show a small player when pointing at the song", isOn: $store.miniPlayer)
-            }
-
-            Section {
-                Picker("When a game is in front", selection: $store.gameMode) {
-                    ForEach(GameMode.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-            } footer: {
-                Text("Also for anything else filling the whole screen. Windows of games are never moved.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Small player when pointing at the song", isOn: $store.miniPlayer)
             }
 
             Section("Date and time") {
@@ -711,17 +769,33 @@ private struct TopBarTab: View {
             }
 
             Section {
+                Picker("When a game is in front", selection: $store.gameMode) {
+                    ForEach(GameMode.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Note("Also for anything else filling the screen.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct DesktopsTab: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        Form {
+            Section {
                 Picker("Show desktops as", selection: $store.desktopStyle) {
                     ForEach(DesktopStyle.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Toggle("Number each screen's desktops from 1", isOn: $store.numberPerScreen)
-                Toggle("Show a picture of a desktop when pointing at it", isOn: $store.peekDesktops)
+                Toggle("Picture of a desktop when pointing at it", isOn: $store.peekDesktops)
                 ForEach(store.desktopRows) { row in
                     HStack(spacing: 10) {
                         Text("Desktop \(row.number)").frame(width: 80, alignment: .leading)
-                        TextField("Name", text: Binding(get: { row.name }, set: { store.setDesktopName(row.id, $0) }))
-                            .textFieldStyle(.roundedBorder)
+                        DesktopNameField(name: row.name) { store.setDesktopName(row.id, $0) }
                         Picker("", selection: Binding(get: { row.colour }, set: { store.setDesktopColour(row.id, $0) })) {
                             Text("No colour").tag(DesktopColour?.none)
                             ForEach(DesktopColour.allCases) { colour in
@@ -733,22 +807,48 @@ private struct TopBarTab: View {
                         .frame(width: 130)
                     }
                 }
-                LabeledContent("Switching desktops") {
-                    HStack {
-                        Text(store.desktopShortcutsOn ? "Ready" : "Needs the Mission Control shortcuts").foregroundStyle(.secondary)
-                        if !store.desktopShortcutsOn {
-                            Button("Open Keyboard Shortcuts…") { DesktopSwitcher.openShortcutSettings() }
-                        }
+                if !store.desktopShortcutsOn {
+                    LabeledContent("Switching desktops needs macOS's shortcuts") {
+                        Button("Open Keyboard Shortcuts…") { DesktopSwitcher.openShortcutSettings() }
                     }
                 }
             } header: {
                 Text("Desktops")
             } footer: {
-                Text("The desktops match Mission Control, numbered across your screens. Click one to go there. To put an app on a desktop, go to it and open the app, or drag a window onto it in Mission Control. Right-click a desktop, or use the list above, to give it a name and a colour; the bar takes on the colour of the desktop you're on. The bar switches desktops with macOS's own Mission Control shortcuts, \"Move left a space\" and \"Move right a space\", which are on unless you've turned them off.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Note("The bar takes on the colour of the desktop you're on. Right-click a desktop in the bar to name or colour it there.")
+            }
+
+            Section {
+                Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
+                Toggle("Tuck away the other windows", isOn: $store.lockInHideOthers)
+                Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
+            } header: {
+                Text("Lock-in mode")
+            } footer: {
+                Note("Lock In puts two apps side by side on the desktop you're on. Everything else there is tucked away until you unlock, and anything new that opens goes elsewhere.")
             }
         }
         .formStyle(.grouped)
+        .onAppear { store.loadDesktops() }
+    }
+}
+
+/// A desktop's name, saved when you press Return or click away rather than at every key.
+private struct DesktopNameField: View {
+    let name: String
+    let save: (String) -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Name", text: $text)
+            .textFieldStyle(.roundedBorder)
+            .focused($focused)
+            .onAppear { text = name }
+            .onSubmit { save(text) }
+            .onChange(of: focused) { _, isFocused in
+                if !isFocused { save(text) }
+            }
     }
 }
 
@@ -789,58 +889,41 @@ private struct BarItemRow: View {
     }
 }
 
-private struct BehaviourTab: View {
+private struct GeneralTab: View {
     @ObservedObject var store: SettingsStore
 
     var body: some View {
         Form {
-            Section("Showing and hiding") {
-                Picker("Position on screen", selection: $store.position) {
-                    ForEach(DockEdge.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                Toggle("Hide automatically, show at the screen edge", isOn: $store.autoHide)
-                Toggle("Hide the macOS Dock", isOn: $store.hideSystemDock)
+            Section {
                 Toggle("Open at login", isOn: $store.openAtLogin)
             }
-            Section("What's in the dock") {
-                Toggle("Pinned apps from the macOS Dock", isOn: $store.showPinned)
-                Toggle("Trash", isOn: $store.showTrash)
-                Toggle("Notification badges", isOn: $store.showBadges)
-            }
-            Section("Clicking and pointing") {
-                Toggle("Window previews when pointing at an app", isOn: $store.showPreviews)
-                Toggle("Scroll up on an icon to show its windows", isOn: $store.scrollToOpen)
-                Toggle("Click the app you're using to hide it", isOn: $store.clickToHide)
-            }
-            Section {
-                Text("⌘-click an icon to show the app in Finder. ⌥-click to switch to it and hide the app you were using. Drag icons sideways to reorder them. Right-click a divider line for quick settings.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-private struct PermissionsTab: View {
-    @ObservedObject var store: SettingsStore
-
-    var body: some View {
-        Form {
             Section {
                 PermissionRow(
                     title: "Accessibility",
-                    detail: "Notification badges, bringing forward the exact window you click in a preview, closing windows from a preview, keeping windows out from under the dock and the top bar, and switching desktops and controlling music from the top bar.",
+                    detail: "Badges, previews, keeping windows clear of the dock and the bar, switching desktops, music controls and lock-in mode.",
                     granted: store.hasAccessibility,
                     settingsPage: "Privacy_Accessibility")
                 PermissionRow(
                     title: "Screen & System Audio Recording",
-                    detail: "Window previews, and reading your wallpaper's colours.",
+                    detail: "Window previews, and your wallpaper's colours.",
                     granted: store.hasScreenRecording,
                     settingsPage: "Privacy_ScreenCapture")
+            } header: {
+                Text("Permissions")
             } footer: {
-                Text("Clear Dock never records or keeps what's on your screen. Pictures for previews are dropped as soon as the preview closes.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Note("Clear Dock never records or keeps what's on your screen.")
+            }
+            Section {
+                HStack {
+                    Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 36, height: 36)
+                    VStack(alignment: .leading) {
+                        Text("Clear Dock").font(.headline)
+                        Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Quit Clear Dock") { NSApp.terminate(nil) }
+                }
             }
         }
         .formStyle(.grouped)
@@ -874,26 +957,6 @@ private struct PermissionRow: View {
             }
         }
         .padding(.vertical, 4)
-    }
-}
-
-private struct AboutTab: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .frame(width: 96, height: 96)
-            Text("Clear Dock").font(.title.bold())
-            Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
-                .foregroundStyle(.secondary)
-            Text("Your apps, without the Dock's background.")
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("Quit Clear Dock") { NSApp.terminate(nil) }
-                .padding(.bottom, 24)
-        }
-        .frame(maxWidth: .infinity)
     }
 }
 

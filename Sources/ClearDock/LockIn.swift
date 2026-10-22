@@ -26,6 +26,9 @@ final class LockIn {
 
     /// Locked-in desktops, by id, for the dock, which keeps out of the way on them.
     static private(set) var lockedSpaces = Set<UInt64>()
+    /// While Mission Control is open, the glow and the edge between the windows are put away:
+    /// they're windows of Clear Dock's own, and would show there as loose lines.
+    static private(set) var missionControlOpen = false
     /// Posted when a desktop is locked in or unlocked.
     static let didChange = Notification.Name("ClearDockLockInChanged")
 
@@ -48,6 +51,8 @@ final class LockIn {
     /// when you next go there, so they reappear on their own desktop.
     private var waiting: [UInt64: [AXUIElement]] = [:]
     private var tokens: [NSObjectProtocol] = []
+    /// Looks every few seconds for windows of other apps opening on a locked-in desktop.
+    private var newcomerTimer: Timer?
 
     /// When each locked-in desktop was locked in, by its id.
     var lockedIn: [UInt64: Date] { sessions.mapValues(\.started) }
@@ -149,6 +154,13 @@ final class LockIn {
         updateWatching()
     }
 
+    /// Mission Control opened or closed.
+    func missionControl(open: Bool) {
+        guard open != Self.missionControlOpen else { return }
+        Self.missionControlOpen = open
+        for session in sessions.values { session.showDecorationsAgain() }
+    }
+
     /// The gap or the glowing edge setting changed.
     func settingsChanged() {
         for session in sessions.values { session.refit() }
@@ -182,7 +194,24 @@ final class LockIn {
         let needed = !sessions.isEmpty || !waiting.isEmpty
         if needed && tokens.isEmpty {
             let center = NSWorkspace.shared.notificationCenter
+            let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.moveNewcomers() }
+            }
+            timer.tolerance = 1
+            RunLoop.main.add(timer, forMode: .default)
+            newcomerTimer = timer
             tokens = [
+                // An app coming forward is usually one opening a window: look straight away, and
+                // again once it's had a moment.
+                center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        for delay in [0.3, 1.2] {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                                MainActor.assumeIsolated { self?.moveNewcomers() }
+                            }
+                        }
+                    }
+                },
                 center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.spaceChanged() }
                 },
@@ -194,6 +223,8 @@ final class LockIn {
         } else if !needed && !tokens.isEmpty {
             tokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
             tokens.removeAll()
+            newcomerTimer?.invalidate()
+            newcomerTimer = nil
         }
     }
 
@@ -202,8 +233,12 @@ final class LockIn {
         for space in waiting.keys where current.contains(space) { restoreWaiting(on: space) }
         for session in sessions.values {
             session.showing = current.contains(session.space)
-            session.updateDecorations()
+            session.showDecorationsAgain()
         }
+    }
+
+    private func moveNewcomers() {
+        for session in sessions.values where session.showing { session.moveNewcomers() }
     }
 
     /// One of the two apps quit, so that desktop's lock-in is over.
@@ -319,6 +354,13 @@ private final class LockInSession {
     private var pendingSettle: DispatchWorkItem?
     private let divider = DividerPanel()
     private let glows = [GlowFrame(), GlowFrame()]
+    /// Frosted covers over the two while you drag the edge between them.
+    private var covers: [CoverPanel] = []
+    /// Where the two were last drawn round, in the system's window coordinates.
+    private var drawnFrames: [CGRect]?
+    /// Where the two were last known to be, kept while the glow is put away (on another desktop, or
+    /// in Mission Control), so it can come back without asking the apps where they are.
+    private var knownFrames: [CGRect]?
     /// How narrow each app has shown it will go, by window, for those that won't go as narrow as asked.
     private var minimumWidths: [CGWindowID: CGFloat] = [:]
 
@@ -329,7 +371,7 @@ private final class LockInSession {
         self.display = display
         self.panes = panes
         movers = panes.map { WindowMover($0.element) }
-        divider.onBegin = { [weak self] in self?.movers.forEach { $0.forget() } }
+        divider.onBegin = { [weak self] in self?.dividerGrabbed() }
         divider.onDrag = { [weak self] x in self?.dividerDragged(to: x) }
         divider.onEnd = { [weak self] in self?.dividerReleased() }
     }
@@ -352,6 +394,8 @@ private final class LockInSession {
     func finish() {
         ended = true
         pendingSettle?.cancel()
+        covers.forEach { $0.fadeOut() }
+        covers = []
         for (_, observer) in observers {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         }
@@ -436,8 +480,29 @@ private final class LockInSession {
 
     // MARK: Dragging the edge between them
 
+    // While you drag the edge, each window is covered by a frosted panel with its app's icon, and
+    // the covers, the edge and the glow follow the pointer as freely as any window you drag. The
+    // apps themselves are resized once, when you let go: apps built on web pages (TradingView,
+    // Discord, Spotify) can't redraw at every width quickly enough to keep up.
+
+    private func dividerGrabbed() {
+        guard !ended, let frames = drawnFrames ?? currentFrames() else { return }
+        movers.forEach { $0.forget() }
+        dragging = true
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        covers = zip(panes, frames).map { pane, frame in
+            let cover = CoverPanel(icon: NSRunningApplication(processIdentifier: pane.pid)?.icon)
+            cover.place(NSRect(x: frame.minX, y: mainHeight - frame.maxY, width: frame.width, height: frame.height))
+            cover.fadeIn()
+            return cover
+        }
+        // The glow and the edge stay in front of the covers.
+        glows.forEach { $0.bringForward() }
+        divider.orderFrontRegardless()
+    }
+
     /// The edge was dragged so its left side is at `x`: the left window ends there and the right
-    /// one starts after the gap. Both are moved on their own queues, never holding anything up.
+    /// one starts after the gap.
     private func dividerDragged(to x: CGFloat) {
         guard !ended, panes.count == 2, let area else { return }
         let gap = CGFloat(BarSettings.lockInGap)
@@ -447,23 +512,87 @@ private final class LockInSession {
         let width = min(max((x + DividerPanel.overlap - area.minX).rounded(), narrowest), widest)
         let left = CGRect(x: area.minX, y: area.minY, width: width, height: area.height)
         let right = CGRect(x: left.maxX + gap, y: area.minY, width: area.maxX - left.maxX - gap, height: area.height)
-        dragging = true
         draggedWidth = width
-        movers[0].move(to: left)
-        movers[1].move(to: right)
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        for (cover, frame) in zip(covers, [left, right]) {
+            cover.place(NSRect(x: frame.minX, y: mainHeight - frame.maxY, width: frame.width, height: frame.height))
+        }
         updateDecorations([left, right])
     }
 
     private func dividerReleased() {
-        guard let width = draggedWidth, let area else { return }
-        draggedWidth = nil
-        BarSettings.lockInSplit = Self.clampSplit(width / (area.width - CGFloat(BarSettings.lockInGap)))
-        // Once both apps have caught up, see where they ended up.
-        WindowMover.whenIdle(movers) { [weak self] in
-            guard let self, !self.ended else { return }
-            self.dragging = false
-            self.settle()
+        let covers = self.covers
+        self.covers = []
+        guard let width = draggedWidth, let area, panes.count == 2 else {
+            covers.forEach { $0.fadeOut() }
+            dragging = false
+            return
         }
+        draggedWidth = nil
+        let gap = CGFloat(BarSettings.lockInGap)
+        BarSettings.lockInSplit = Self.clampSplit(width / (area.width - gap))
+        // Now the apps resize, once each, out of sight under the covers.
+        let goals = [CGRect(x: area.minX, y: area.minY, width: width, height: area.height),
+                     CGRect(x: area.minX + width + gap, y: area.minY, width: area.width - width - gap, height: area.height)]
+        for (mover, goal) in zip(movers, goals) { mover.move(to: goal) }
+        WindowMover.whenIdle(movers) { [weak self] in
+            // A moment for the apps to draw at their new size before the covers lift.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                MainActor.assumeIsolated {
+                    covers.forEach { $0.fadeOut() }
+                    guard let self, !self.ended else { return }
+                    self.dragging = false
+                    self.settle()
+                }
+            }
+        }
+    }
+
+    // MARK: Windows opening on the desktop
+
+    /// Windows of other apps that open on the desktop while it's locked in go elsewhere: onto the
+    /// desktop showing on another screen when there is one (macOS lets apps move windows between
+    /// screens, though not between desktops), or else they're tucked away with the rest.
+    func moveNewcomers() {
+        guard !ended, !dragging, showing else { return }
+        let mine = Set(panes.map(\.pid))
+        let me = getpid()
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var found: [pid_t: Set<CGWindowID>] = [:]
+        for info in list {
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me, !mine.contains(pid),
+                  let id = info[kCGWindowNumber as String] as? CGWindowID,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds), rect.width >= 80, rect.height >= 60,
+                  WindowSpaces.spaceIDs(of: id) == [space] else { continue }
+            found[pid, default: []].insert(id)
+        }
+        guard !found.isEmpty else { return }
+        let elsewhere = NSScreen.screens.first { $0.displayID != display }
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        var tuckedAny = false
+        for (pid, ids) in found {
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.3)
+            for window in (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
+                guard (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole,
+                      let id = AppWindowList.windowID(of: window), ids.contains(id) else { continue }
+                if let elsewhere {
+                    let room = elsewhere.visibleFrame.insetBy(dx: 40, dy: 40)
+                    if let frame = LockIn.frame(of: window), frame.width > room.width || frame.height > room.height {
+                        Self.setSize(window, CGSize(width: min(frame.width, room.width), height: min(frame.height, room.height)))
+                    }
+                    Self.setPosition(window, CGPoint(x: room.minX, y: mainHeight - room.maxY))
+                } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+                    tucked.append(window)
+                    tuckedAny = true
+                }
+            }
+        }
+        // An app whose window was just tucked away is still the one in front: go back to the two.
+        if tuckedAny { WindowFocus.raise(panes[0].id, of: panes[0].pid) }
     }
 
     // MARK: Watching them
@@ -526,7 +655,10 @@ private final class LockInSession {
     /// showing: where the windows are given as `frames` (in the system's window coordinates), or
     /// else where they are now.
     func updateDecorations(_ frames: [CGRect]? = nil) {
-        guard !ended, showing, panes.count == 2, let frames = frames ?? currentFrames() else { return hideDecorations() }
+        guard !ended, showing, !LockIn.missionControlOpen, panes.count == 2,
+              let frames = frames ?? currentFrames() else { return hideDecorations() }
+        drawnFrames = frames
+        knownFrames = frames
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
         func flipped(_ rect: CGRect) -> NSRect { NSRect(x: rect.minX, y: mainHeight - rect.maxY, width: rect.width, height: rect.height) }
         if BarSettings.lockInBorder {
@@ -543,7 +675,14 @@ private final class LockInSession {
         divider.show(at: flipped(CGRect(x: left.maxX - overlap, y: top, width: right.minX - left.maxX + overlap * 2, height: bottom - top)))
     }
 
+    /// After switching desktops or leaving Mission Control: put the glow and the edge back where
+    /// the windows were (busy apps can be slow to say where they are, which would hold things up).
+    func showDecorationsAgain() {
+        updateDecorations(knownFrames)
+    }
+
     private func hideDecorations() {
+        drawnFrames = nil
         divider.orderOut(nil)
         glows.forEach { $0.hide() }
     }
@@ -674,8 +813,8 @@ final class DividerPanel: NSPanel {
         hasShadow = false
         hidesOnDeactivate = false
         level = .floating
-        // Only on the desktop it's shown on.
-        collectionBehavior = [.managed, .ignoresCycle]
+        // On the desktop it's shown on, and left out of Mission Control.
+        collectionBehavior = [.transient, .ignoresCycle]
         isReleasedWhenClosed = false
         contentView = DividerView()
     }
@@ -764,6 +903,10 @@ final class GlowFrame {
         strips.forEach { $0.orderOut(nil) }
     }
 
+    func bringForward() {
+        for strip in strips where strip.isVisible { strip.orderFrontRegardless() }
+    }
+
     /// `window` is the window's frame in the usual bottom-up screen coordinates.
     func show(around window: NSRect, color: NSColor) {
         let outer = window.insetBy(dx: -Self.margin, dy: -Self.margin)
@@ -796,8 +939,8 @@ private final class GlowStrip: NSPanel {
         hidesOnDeactivate = false
         ignoresMouseEvents = true
         level = .floating
-        // Only on the desktop it's shown on.
-        collectionBehavior = [.managed, .ignoresCycle]
+        // On the desktop it's shown on, and left out of Mission Control.
+        collectionBehavior = [.transient, .ignoresCycle]
         isReleasedWhenClosed = false
         let view = NSView()
         view.wantsLayer = true
@@ -833,4 +976,75 @@ private final class GlowStrip: NSPanel {
         CATransaction.commit()
         if !isVisible { orderFrontRegardless() }
     }
+}
+
+/// A frosted cover with an app's icon, over one of the two windows while you drag the edge between
+/// them. Made when you take hold of the edge and let go of when you let go, so it uses no memory
+/// the rest of the time.
+@MainActor
+final class CoverPanel: NSPanel {
+    private static let cornerRadius: CGFloat = 14
+    private let iconView = NSImageView()
+
+    init(icon: NSImage?) {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        hidesOnDeactivate = false
+        ignoresMouseEvents = true
+        level = .floating
+        collectionBehavior = [.transient, .ignoresCycle]
+        isReleasedWhenClosed = false
+        alphaValue = 0
+        let blur = NSVisualEffectView()
+        blur.material = .fullScreenUI
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        blur.maskImage = Self.mask
+        iconView.image = icon
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        blur.addSubview(iconView)
+        contentView = blur
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    /// `frame` in the usual bottom-up screen coordinates.
+    func place(_ frame: NSRect) {
+        setFrame(frame, display: false)
+        let side = min(84, frame.width * 0.4, frame.height * 0.4)
+        iconView.frame = NSRect(x: (frame.width - side) / 2, y: (frame.height - side) / 2, width: side, height: side)
+        if !isVisible { orderFrontRegardless() }
+    }
+
+    func fadeIn() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.1
+            animator().alphaValue = 1
+        }
+    }
+
+    func fadeOut() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            animator().alphaValue = 0
+        } completionHandler: {
+            MainActor.assumeIsolated { self.close() }
+        }
+    }
+
+    /// Rounded like a window's corners, stretching to any size.
+    private static let mask: NSImage = {
+        let edge = cornerRadius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
+        image.resizingMode = .stretch
+        return image
+    }()
 }

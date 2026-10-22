@@ -14,7 +14,6 @@ struct BarLook: Equatable {
     var showDate = true
     var use24Hour = false
     var desktopStyle = DesktopStyle.separate
-    var numberPerScreen = false
     var peekDesktops = true
     var albumColours = true
     var miniPlayer = true
@@ -322,7 +321,7 @@ final class TopBarController {
         if !BarSettings.items.contains(where: { $0.kind == .lockIn && $0.isOn }) { lockIn.endAll() }
         lockIn.settingsChanged()
         applyLook()
-        refreshWallpaperColors()
+        refreshWallpaperColors(unlessRecent: true)
         layout()
     }
 
@@ -362,8 +361,9 @@ final class TopBarController {
             $0.refreshWallpaperColors()
             $0.checkFullScreen()
             $0.scheduleLayout(after: 0.4)
-            // Each desktop can have its own wallpaper; take the strip again once the switch has settled.
-            $0.refreshBackdrops(after: 0.8)
+            // Each desktop can have its own wallpaper; take the strip again once the switch (or a
+            // run of them) has settled, so macOS isn't asked for pictures mid-animation.
+            $0.refreshBackdrops(after: 1.5)
         }
         observe(workspace, NSWorkspace.didActivateApplicationNotification) {
             $0.refreshFrontApp()
@@ -589,6 +589,7 @@ final class TopBarController {
         guard open != exposeScreens else { return }
         let opened = open.subtracting(exposeScreens), closed = exposeScreens.subtracting(open)
         exposeScreens = open
+        lockIn.missionControl(open: !open.isEmpty)
         if !opened.isEmpty { popover.hide() }
         for id in opened { exposeChanged(on: id, open: true) }
         for id in closed { exposeChanged(on: id, open: false) }
@@ -901,9 +902,9 @@ final class TopBarController {
 
     // MARK: Colours
 
-    private func refreshWallpaperColors() {
+    private func refreshWallpaperColors(unlessRecent: Bool = false) {
         guard BarSettings.usesWallpaper else { return }
-        WallpaperPalette.shared.refresh(for: NSScreen.screens.first)
+        WallpaperPalette.shared.refresh(for: NSScreen.screens.first, unlessRecent: unlessRecent)
     }
 
     private func applyLook() {
@@ -923,7 +924,6 @@ final class TopBarController {
         look.showDate = BarSettings.showDate
         look.use24Hour = BarSettings.use24Hour
         look.desktopStyle = BarSettings.desktopStyle
-        look.numberPerScreen = BarSettings.numberPerScreen
         look.peekDesktops = BarSettings.peekDesktops
         look.albumColours = BarSettings.albumColours
         look.miniPlayer = BarSettings.miniPlayer

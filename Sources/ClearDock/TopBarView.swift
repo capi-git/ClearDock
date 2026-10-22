@@ -124,7 +124,7 @@ private struct DesktopPills: View {
     }
 
     private func number(_ desktop: Desktop, index: Int) -> Int {
-        look.numberPerScreen ? index + 1 : desktop.number
+        desktop.number
     }
 
     @ViewBuilder private func label(_ desktop: Desktop, index: Int) -> some View {

@@ -21,12 +21,20 @@ final class WallpaperPalette {
     private static let fallbackAccent = NSColor(srgbRed: 0.45, green: 0.72, blue: 1, alpha: 1)
 
     private var task: Task<Void, Never>?
+    private var lastLooked: Date?
 
-    func refresh(for screen: NSScreen?) {
+    /// Looks at the wallpaper again, a moment after the last time it's asked: desktop switches in a
+    /// row, and the dock and the bar asking together, make one look, taken once a switch has
+    /// finished rather than in the middle of its animation. `unlessRecent` skips it when it looked
+    /// in the last half minute, for changes (like settings) that can't have changed the wallpaper.
+    func refresh(for screen: NSScreen?, unlessRecent: Bool = false) {
         guard let screen else { return }
+        if unlessRecent, let lastLooked, Date().timeIntervalSince(lastLooked) < 30 { return }
         task?.cancel()
         task = Task { @MainActor [weak self] in
-            guard let image = await Self.wallpaperImage(for: screen) else { return }
+            try? await Task.sleep(for: .seconds(0.9))
+            guard !Task.isCancelled, let image = await Self.wallpaperImage(for: screen) else { return }
+            self?.lastLooked = Date()
             guard let self, !Task.isCancelled, let colors = Self.colors(in: image) else { return }
             // A live wallpaper (from an app like Wallspace) looks a little different each time it's
             // looked at; only a real change of wallpaper should change the colours.

@@ -167,9 +167,9 @@ final class DockController {
         applyMode()
     }
 
-    private func refreshWallpaperColors() {
+    private func refreshWallpaperColors(unlessRecent: Bool = false) {
         guard Appearance.usesWallpaper else { return }
-        WallpaperPalette.shared.refresh(for: currentScreen)
+        WallpaperPalette.shared.refresh(for: currentScreen, unlessRecent: unlessRecent)
     }
 
     private func checkFullScreen() {
@@ -183,10 +183,12 @@ final class DockController {
         if let screen, !NSScreen.screens.contains(screen) { self.screen = nil }
         Appearance.reload()
         container.background.apply()
-        refreshWallpaperColors()
+        refreshWallpaperColors(unlessRecent: true)
         model.reload()
         applyMode()
-        if shown { startBadgeUpdates() }
+        // Badges only need starting or stopping when that's what changed.
+        let wantsBadges = Settings.showBadges && (BadgeReader.hasPermission || previewBadge != nil)
+        if shown && (badgeTimer != nil) != wantsBadges { startBadgeUpdates() }
     }
 
     private var currentScreen: NSScreen? { screen ?? NSScreen.screens.first }

@@ -223,12 +223,6 @@ enum BarSettings {
         set { defaults.set(newValue.rawValue, forKey: "bar.desktopStyle") }
     }
 
-    /// Number each screen's desktops from 1, instead of counting across all screens as Mission Control does.
-    static var numberPerScreen: Bool {
-        get { defaults.bool(forKey: "bar.numberPerScreen") }
-        set { defaults.set(newValue, forKey: "bar.numberPerScreen") }
-    }
-
     /// Colours you've given desktops, by the desktop's id.
     static var desktopColours: [String: DesktopColour] {
         get {

@@ -13,9 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Settings.hideSystemDock { SystemDock.hide() }
         controller = DockController()
         topBar = TopBarController()
-        SettingsWindowController.shared.onChange = { [weak self] in
-            self?.controller?.settingsChanged()
-            self?.topBar?.settingsChanged()
+        SettingsWindowController.shared.onChange = { [weak self] area in
+            switch area {
+            case .dock: self?.controller?.settingsChanged()
+            case .bar: self?.topBar?.settingsChanged()
+            }
         }
         SettingsWindowController.shared.onOpenChanged = { [weak self] open in self?.controller?.keepVisible = open }
         NSApp.mainMenu = Self.makeMainMenu()
