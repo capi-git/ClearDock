@@ -848,7 +848,9 @@ private struct DesktopNameField: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextField("Name", text: $text)
+        TextField("", text: $text, prompt: Text("Name"))
+            .labelsHidden()
+            .multilineTextAlignment(.leading)
             .textFieldStyle(.roundedBorder)
             .focused($focused)
             .onAppear { text = name }
