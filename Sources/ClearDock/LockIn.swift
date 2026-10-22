@@ -354,8 +354,8 @@ private final class LockInSession {
     private var pendingSettle: DispatchWorkItem?
     private let divider = DividerPanel()
     private let glows = [GlowFrame(), GlowFrame()]
-    /// Frosted covers over the two while you drag the edge between them.
-    private var covers: [CoverPanel] = []
+    /// What you see while you drag the edge between them.
+    private var overlay: DragOverlay?
     /// Where the two were last drawn round, in the system's window coordinates.
     private var drawnFrames: [CGRect]?
     /// Where the two were last known to be, kept while the glow is put away (on another desktop, or
@@ -394,8 +394,8 @@ private final class LockInSession {
     func finish() {
         ended = true
         pendingSettle?.cancel()
-        covers.forEach { $0.fadeOut() }
-        covers = []
+        overlay?.finish()
+        overlay = nil
         for (_, observer) in observers {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         }
@@ -481,24 +481,20 @@ private final class LockInSession {
     // MARK: Dragging the edge between them
 
     // While you drag the edge, each window is covered by a frosted panel with its app's icon, and
-    // the covers, the edge and the glow follow the pointer as freely as any window you drag. The
+    // the covers, the glow and the grip follow the pointer as freely as any window you drag. The
     // apps themselves are resized once, when you let go: apps built on web pages (TradingView,
     // Discord, Spotify) can't redraw at every width quickly enough to keep up.
 
     private func dividerGrabbed() {
-        guard !ended, let frames = drawnFrames ?? currentFrames() else { return }
+        guard !ended, let area, let frames = drawnFrames ?? currentFrames() else { return }
         movers.forEach { $0.forget() }
         dragging = true
-        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
-        covers = zip(panes, frames).map { pane, frame in
-            let cover = CoverPanel(icon: NSRunningApplication(processIdentifier: pane.pid)?.icon)
-            cover.place(NSRect(x: frame.minX, y: mainHeight - frame.maxY, width: frame.width, height: frame.height))
-            cover.fadeIn()
-            return cover
-        }
-        // The glow and the edge stay in front of the covers.
-        glows.forEach { $0.bringForward() }
-        divider.orderFrontRegardless()
+        let overlay = DragOverlay(over: Self.flipped(area), icons: panes.map { NSRunningApplication(processIdentifier: $0.pid)?.icon },
+                                  color: accent(), glow: BarSettings.lockInBorder)
+        overlay.move(frames.map(Self.flipped))
+        self.overlay = overlay
+        // It draws the glow while you drag; the usual one steps aside.
+        glows.forEach { $0.hide() }
     }
 
     /// The edge was dragged so its left side is at `x`: the left window ends there and the right
@@ -513,19 +509,17 @@ private final class LockInSession {
         let left = CGRect(x: area.minX, y: area.minY, width: width, height: area.height)
         let right = CGRect(x: left.maxX + gap, y: area.minY, width: area.maxX - left.maxX - gap, height: area.height)
         draggedWidth = width
-        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
-        for (cover, frame) in zip(covers, [left, right]) {
-            cover.place(NSRect(x: frame.minX, y: mainHeight - frame.maxY, width: frame.width, height: frame.height))
-        }
-        updateDecorations([left, right])
+        overlay?.move([Self.flipped(left), Self.flipped(right)])
     }
 
     private func dividerReleased() {
-        let covers = self.covers
-        self.covers = []
+        let overlay = self.overlay
+        self.overlay = nil
         guard let width = draggedWidth, let area, panes.count == 2 else {
-            covers.forEach { $0.fadeOut() }
+            // Taken hold of without being moved.
+            overlay?.finish()
             dragging = false
+            updateDecorations()
             return
         }
         draggedWidth = nil
@@ -539,13 +533,21 @@ private final class LockInSession {
             // A moment for the apps to draw at their new size before the covers lift.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                 MainActor.assumeIsolated {
-                    covers.forEach { $0.fadeOut() }
-                    guard let self, !self.ended else { return }
+                    guard let self, !self.ended else { overlay?.finish(); return }
                     self.dragging = false
+                    // Puts the glow and the edge back, where the windows now are.
                     self.settle()
+                    overlay?.finish()
                 }
             }
         }
+    }
+
+    /// From the system's window coordinates (measured down from the top of the main screen) to the
+    /// usual bottom-up screen coordinates.
+    private static func flipped(_ rect: CGRect) -> NSRect {
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        return NSRect(x: rect.minX, y: mainHeight - rect.maxY, width: rect.width, height: rect.height)
     }
 
     // MARK: Windows opening on the desktop
@@ -825,11 +827,15 @@ final class DividerPanel: NSPanel {
     /// `frame` in the usual bottom-up screen coordinates.
     func show(at frame: NSRect) {
         if self.frame != frame { setFrame(frame, display: true) }
+        (contentView as? DividerView)?.gripHidden = false
         if !isVisible { orderFrontRegardless() }
     }
 }
 
 private final class DividerView: NSView {
+    /// From taking hold of it until it's put where the windows ended up: the covers draw the grip
+    /// meanwhile, where the pointer is.
+    var gripHidden = false { didSet { if gripHidden != oldValue { needsDisplay = true } } }
     private var grabbedAt: CGFloat = 0
     private var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
     private var dragging = false { didSet { if dragging != oldValue { needsDisplay = true } } }
@@ -860,6 +866,7 @@ private final class DividerView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         dragging = true
+        gripHidden = true
         // Where on the edge you took hold of it, so it doesn't jump to the pointer.
         grabbedAt = NSEvent.mouseLocation.x - (window?.frame.minX ?? 0)
         panel?.onBegin()
@@ -879,8 +886,9 @@ private final class DividerView: NSView {
         // Very nearly clear: a window that's fully clear somewhere lets clicks through there.
         NSColor.white.withAlphaComponent(0.004).setFill()
         bounds.fill()
+        guard !gripHidden else { return }
         let grip = NSRect(x: bounds.midX - 2, y: bounds.midY - 22, width: 4, height: 44)
-        NSColor.white.withAlphaComponent(dragging ? 0.9 : hovering ? 0.7 : 0.35).setFill()
+        NSColor.white.withAlphaComponent(hovering ? 0.7 : 0.35).setFill()
         NSBezierPath(roundedRect: grip, xRadius: 2, yRadius: 2).fill()
     }
 }
@@ -890,10 +898,10 @@ private final class DividerView: NSView {
 /// small. It never takes clicks, and sits on the lock-in desktop only.
 @MainActor
 final class GlowFrame {
-    private static let margin: CGFloat = 10
-    private static let lineWidth: CGFloat = 3
+    static let margin: CGFloat = 10
+    static let lineWidth: CGFloat = 3
     /// Close to the corners of macOS windows.
-    private static let cornerRadius: CGFloat = 14
+    static let cornerRadius: CGFloat = 14
     /// How deep each strip is: the margin outside the window, and a little way in for the glow.
     private static let depth: CGFloat = 22
 
@@ -978,72 +986,156 @@ private final class GlowStrip: NSPanel {
     }
 }
 
-/// A frosted cover with an app's icon, over one of the two windows while you drag the edge between
-/// them. Made when you take hold of the edge and let go of when you let go, so it uses no memory
-/// the rest of the time.
+/// What you see while you drag the edge between the two windows: one see-through window over the
+/// lock-in space holding a frosted cover over each window (with its app's icon), their glow and the
+/// grip. Everything in it moves together, once per screen refresh, to wherever the pointer has got
+/// to, so the pieces never drift apart, and nothing in it asks the apps anything. Made when you
+/// take hold of the edge and let go of when you let go, so it uses no memory the rest of the time.
 @MainActor
-final class CoverPanel: NSPanel {
-    private static let cornerRadius: CGFloat = 14
-    private let iconView = NSImageView()
+final class DragOverlay: NSObject {
+    /// How far past the windows it reaches, for the glow.
+    private static let reach: CGFloat = GlowFrame.margin + 8
 
-    init(icon: NSImage?) {
-        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-        hidesOnDeactivate = false
-        ignoresMouseEvents = true
-        level = .floating
-        collectionBehavior = [.transient, .ignoresCycle]
-        isReleasedWhenClosed = false
-        alphaValue = 0
-        let blur = NSVisualEffectView()
-        blur.material = .fullScreenUI
-        blur.blendingMode = .behindWindow
-        blur.state = .active
-        blur.maskImage = Self.mask
-        iconView.image = icon
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        blur.addSubview(iconView)
-        contentView = blur
-    }
+    private let panel: NSPanel
+    private let origin: NSPoint
+    private var covers: [NSVisualEffectView] = []
+    private var iconViews: [NSImageView] = []
+    private var glows: [CAShapeLayer] = []
+    private let grip = CALayer()
+    private var pending: [NSRect]?
+    private var placed = false
+    private var link: CADisplayLink?
 
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
+    /// `area` is the lock-in space, in the usual bottom-up screen coordinates.
+    init(over area: NSRect, icons: [NSImage?], color: NSColor, glow: Bool) {
+        let frame = area.insetBy(dx: -Self.reach, dy: -Self.reach)
+        origin = frame.origin
+        panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        super.init()
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        panel.level = .floating
+        panel.collectionBehavior = [.transient, .ignoresCycle]
+        panel.isReleasedWhenClosed = false
 
-    /// `frame` in the usual bottom-up screen coordinates.
-    func place(_ frame: NSRect) {
-        setFrame(frame, display: false)
-        let side = min(84, frame.width * 0.4, frame.height * 0.4)
-        iconView.frame = NSRect(x: (frame.width - side) / 2, y: (frame.height - side) / 2, width: side, height: side)
-        if !isVisible { orderFrontRegardless() }
-    }
+        let root = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        for icon in icons {
+            let cover = NSVisualEffectView()
+            cover.material = .fullScreenUI
+            cover.blendingMode = .behindWindow
+            cover.state = .active
+            cover.maskImage = Self.mask
+            cover.alphaValue = 0
+            let iconView = NSImageView()
+            iconView.image = icon
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            cover.addSubview(iconView)
+            root.addSubview(cover)
+            covers.append(cover)
+            iconViews.append(iconView)
+        }
+        // The glow and the grip, above the covers.
+        let top = NSView(frame: root.bounds)
+        top.layer = CALayer()
+        top.wantsLayer = true
+        if glow {
+            for _ in icons {
+                let layer = CAShapeLayer()
+                layer.fillColor = nil
+                layer.lineWidth = GlowFrame.lineWidth
+                layer.strokeColor = color.cgColor
+                layer.shadowColor = color.cgColor
+                layer.shadowOpacity = 0.9
+                layer.shadowRadius = 6
+                layer.shadowOffset = .zero
+                top.layer?.addSublayer(layer)
+                glows.append(layer)
+            }
+        }
+        grip.backgroundColor = NSColor.white.withAlphaComponent(0.9).cgColor
+        grip.cornerRadius = 2
+        top.layer?.addSublayer(grip)
+        root.addSubview(top)
+        panel.contentView = root
+        panel.orderFrontRegardless()
 
-    func fadeIn() {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.1
-            animator().alphaValue = 1
+            covers.forEach { $0.animator().alphaValue = 1 }
+        }
+        // In step with the screen's refreshes.
+        let link = root.displayLink(target: self, selector: #selector(step(_:)))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    /// Where the two windows now go, left then right, in the usual bottom-up screen coordinates.
+    func move(_ frames: [NSRect]) {
+        guard placed else {
+            placed = true
+            return apply(frames)
+        }
+        pending = frames
+    }
+
+    /// Lifts the covers, then goes away.
+    func finish() {
+        link?.invalidate()
+        link = nil
+        glows.forEach { $0.removeFromSuperlayer() }
+        grip.removeFromSuperlayer()
+        let panel = self.panel
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            covers.forEach { $0.animator().alphaValue = 0 }
+        } completionHandler: {
+            MainActor.assumeIsolated { panel.close() }
         }
     }
 
-    func fadeOut() {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
-            animator().alphaValue = 0
-        } completionHandler: {
-            MainActor.assumeIsolated { self.close() }
+    @objc private func step(_ link: CADisplayLink) {
+        guard let frames = pending else { return }
+        pending = nil
+        apply(frames)
+    }
+
+    private func apply(_ frames: [NSRect]) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let local = frames.map { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
+        for (index, frame) in local.enumerated() where index < covers.count {
+            covers[index].frame = frame
+            let side = min(84, frame.width * 0.4, frame.height * 0.4)
+            iconViews[index].frame = NSRect(x: (frame.width - side) / 2, y: (frame.height - side) / 2, width: side, height: side)
+            if index < glows.count {
+                let outset = GlowFrame.lineWidth / 2 + 1
+                let radius = GlowFrame.cornerRadius + outset
+                let path = CGPath(roundedRect: frame.insetBy(dx: -outset, dy: -outset), cornerWidth: radius, cornerHeight: radius, transform: nil)
+                glows[index].path = path
+                glows[index].shadowPath = path.copy(strokingWithWidth: GlowFrame.lineWidth, lineCap: .butt, lineJoin: .round, miterLimit: 10)
+            }
         }
+        if local.count == 2 {
+            let left = local[0], right = local[1]
+            let midY = (max(left.minY, right.minY) + min(left.maxY, right.maxY)) / 2
+            grip.frame = CGRect(x: (left.maxX + right.minX) / 2 - 2, y: midY - 22, width: 4, height: 44)
+        }
+        CATransaction.commit()
     }
 
     /// Rounded like a window's corners, stretching to any size.
     private static let mask: NSImage = {
-        let edge = cornerRadius * 2 + 1
+        let radius = GlowFrame.cornerRadius
+        let edge = radius * 2 + 1
         let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
             NSColor.black.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
             return true
         }
-        image.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
         image.resizingMode = .stretch
         return image
     }()

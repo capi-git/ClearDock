@@ -529,7 +529,8 @@ private struct LockInPickerView: View {
         .foregroundStyle(.white)
         .padding(12)
         .frame(width: 300)
-        .background(PopoverBackground(look: look))
+        // See-through glass, like the bar's, with a hint of the bar's colour so the words stay clear.
+        .glassEffect(.regular.tint(Color(nsColor: look.fill).opacity(0.3)), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
