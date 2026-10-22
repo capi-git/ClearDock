@@ -903,8 +903,13 @@ final class TopBarController {
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
         // Clear Dock comes forward for a moment when it starts or switches desktops; keep showing
         // the app you're using then. It only counts while its settings window is open.
-        if app.processIdentifier == getpid(),
-           !NSApp.windows.contains(where: { $0.isVisible && $0.level == .normal }) { return }
+        if app.processIdentifier == getpid() {
+            guard NSApp.windows.contains(where: { $0.isVisible && $0.level == .normal }) else { return }
+        } else if app.activationPolicy != .regular {
+            // macOS's own helpers come forward for a moment too (a password or Touch ID prompt is
+            // "SecurityAgentHelper"): keep showing the app you're using.
+            return
+        }
         let name = app.localizedName ?? ""
         if model.appName != name { model.appName = name }
         model.appIcon = model.icon(for: app.processIdentifier)
