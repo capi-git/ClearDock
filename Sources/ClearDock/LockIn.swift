@@ -36,6 +36,8 @@ final class LockIn {
     private var sessions: [UInt64: LockInSession] = [:]
     /// The desktop whose two windows you're choosing right now.
     private(set) var choosing: UInt64?
+    /// Getting a desktop's windows ready, which takes a moment.
+    private(set) var starting = false
     /// Windows tucked away on desktops whose lock-in ended while you were elsewhere. They come back
     /// when you next go there, so they reappear on their own desktop.
     private var waiting: [UInt64: [AXUIElement]] = [:]
@@ -50,16 +52,32 @@ final class LockIn {
     /// two windows, closes the chooser instead.
     func toggle() {
         if choosing != nil { return dismissChooser() }
+        guard !starting else { return }
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.screens.first,
               let desktop = Self.currentDesktop(on: screen) else { return }
-        if let session = sessions[desktop.id] { return end(session) }
-        lock(desktop, on: screen)
+        if let session = sessions[desktop.id] {
+            // A second click straight after locking in is a double-click, not a wish to unlock.
+            guard Date().timeIntervalSince(session.started) > 1.5 else { return }
+            return end(session)
+        }
+        // Show "Locking in…" first: finding the windows takes a moment.
+        starting = true
+        onChange()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.starting else { return }
+                self.starting = false
+                self.lock(desktop, on: screen)
+                self.onChange()
+            }
+        }
     }
 
     /// Unlocks every desktop and puts back all the windows tucked away: the bar is going away, or
     /// Clear Dock is quitting.
     func endAll() {
+        starting = false
         dismissChooser()
         for session in Array(sessions.values) { end(session, now: true) }
         for windows in waiting.values { Self.unminimize(windows) }
@@ -81,11 +99,11 @@ final class LockIn {
             Self.explain("Lock-in needs two windows on this desktop", "Open the two apps you want side by side here, then click Lock In.")
         case (2, _):
             // Each stays on the side it's on now.
-            start(windows.sorted { $0.frame.midX < $1.frame.midX }, on: desktop.id, screen: screen)
+            start(windows.sorted { $0.frame.midX < $1.frame.midX }, of: windows, on: desktop.id, screen: screen)
         case (_, 2):
             // The front window of each app, each on the side it's on now.
             let fronts = apps.compactMap { pid in windows.first { $0.pid == pid } }
-            start(fronts.sorted { $0.frame.midX < $1.frame.midX }, on: desktop.id, screen: screen)
+            start(fronts.sorted { $0.frame.midX < $1.frame.midX }, of: windows, on: desktop.id, screen: screen)
         default:
             choosing = desktop.id
             onChange()
@@ -95,12 +113,13 @@ final class LockIn {
                 self.onChange()
                 // Only if you're still on that desktop.
                 guard let picked, Self.currentDesktop(on: screen)?.id == desktop.id else { return }
-                self.start(picked, on: desktop.id, screen: screen)
+                self.start(picked, of: windows, on: desktop.id, screen: screen)
             }
         }
     }
 
-    private func start(_ picked: [Choice], on space: UInt64, screen: NSScreen) {
+    /// Locks in two of the desktop's windows; the rest of `all` are tucked away, if that's on.
+    private func start(_ picked: [Choice], of all: [Choice], on space: UInt64, screen: NSScreen) {
         guard picked.count == 2, picked[0].id != picked[1].id, let display = screen.displayID, sessions[space] == nil else { return }
         restoreWaiting(on: space)
         let session = LockInSession(space: space, display: display,
@@ -114,7 +133,10 @@ final class LockIn {
             self.end(session)
         }
         sessions[space] = session
-        if BarSettings.lockInHideOthers { session.tuckOthers() }
+        if BarSettings.lockInHideOthers {
+            let kept = Set(picked.map(\.id))
+            session.tuck(all.filter { !kept.contains($0.id) }.map(\.element))
+        }
         session.begin()
         updateWatching()
         onChange()
@@ -290,7 +312,11 @@ private final class LockInSession {
     private var ended = false
     /// The window being resized by you right now, which the other follows as you drag.
     private var driving: AXUIElement?
-    private var lastFollow: CFTimeInterval = 0
+    private var lastStep: CFTimeInterval = 0
+    /// Where the window following yours was last put, while you drag.
+    private var followedX: CGFloat?
+    /// The one of the two you're using, with the glowing edge round it; nil while neither is.
+    private var lit: Pane?
     private var observers: [pid_t: AXObserver] = [:]
     private var pendingFit: DispatchWorkItem?
     private var border: BorderPanel?
@@ -310,6 +336,8 @@ private final class LockInSession {
     func begin() {
         watch()
         fit()
+        // Then make room for an app that wouldn't go as narrow as its share.
+        scheduleSettle()
         // Bring one of the two forward, unless you're already using one.
         if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, !involves(front) {
             WindowFocus.raise(panes[0].id, of: panes[0].pid)
@@ -328,22 +356,10 @@ private final class LockInSession {
         border = nil
     }
 
-    /// Minimizes the other windows on the desktop (only there), so just the two and the wallpaper show.
-    func tuckOthers() {
-        let keep = Set(panes.map(\.id))
-        let me = getpid()
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != me {
-            let element = AXUIElementCreateApplication(app.processIdentifier)
-            AXUIElementSetMessagingTimeout(element, 0.5)
-            for window in (LockIn.attribute(element, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
-                guard (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole,
-                      (LockIn.attribute(window, kAXMinimizedAttribute) as? Bool) != true,
-                      let id = AppWindowList.windowID(of: window), !keep.contains(id),
-                      WindowSpaces.spaceIDs(of: id) == [space] else { continue }
-                if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
-                    tucked.append(window)
-                }
-            }
+    /// Minimizes the desktop's other windows, so just the two and the wallpaper show.
+    func tuck(_ windows: [AXUIElement]) {
+        for window in windows where AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+            tucked.append(window)
         }
     }
 
@@ -395,47 +411,59 @@ private final class LockInSession {
             BarSettings.lockInSplit = Self.clampSplit((left.maxX - area.minX) / usable)
         } else if abs(right.maxX - goals[1].maxX) < 3 && abs(right.minX - goals[1].minX) > 3 && abs(right.width - goals[1].width) > 3 {
             BarSettings.lockInSplit = Self.clampSplit((right.minX - gap - area.minX) / usable)
+        } else if abs(right.minX - goals[1].minX) < 3 && right.width > goals[1].width + 16 {
+            // The right one won't go as narrow as its share (some apps have a smallest size),
+            // so it would reach off the screen: give it the room it needs.
+            BarSettings.lockInSplit = Self.clampSplit((area.width - gap - right.width) / usable)
         }
         fit()
     }
 
     private static func clampSplit(_ value: CGFloat) -> Double { Double(min(0.8, max(0.2, value))) }
 
-    /// Resizes the other window to fill the rest of the space as you drag one's inner edge,
-    /// up to about sixty times a second.
-    private func follow(_ element: AXUIElement) {
-        guard panes.count == 2, let area, let index = panes.firstIndex(where: { CFEqual($0.element, element) }) else { return }
-        // Only the window you're dragging leads; the other's own resizing (from following) doesn't.
-        if let driving, !CFEqual(driving, element) { return }
-        let now = CACurrentMediaTime()
-        guard now - lastFollow > 1.0 / 60 else { return }
+    /// Resizes the other window to fill the rest of the space as you drag one's inner edge.
+    /// Returns whether it did.
+    private func follow(_ element: AXUIElement) -> Bool {
+        guard panes.count == 2, let area, let index = panes.firstIndex(where: { CFEqual($0.element, element) }),
+              let moved = LockIn.frame(of: element) else { return false }
         let goals = targets
-        guard let moved = LockIn.frame(of: element) else { return }
         let gap = CGFloat(BarSettings.lockInGap)
-        let other = panes[1 - index].element
+        let other = panes[1 - index]
+        let target: CGRect
         if index == 0 {
             // The left window's right edge is the divider, while its left edge stays put.
-            guard abs(moved.minX - goals[0].minX) < 3 else { return }
+            guard abs(moved.minX - goals[0].minX) < 3 else { return false }
             let x = moved.maxX + gap
-            guard area.maxX - x > 120 else { return }
-            driving = element
-            lastFollow = now
-            LockIn.setPosition(other, CGPoint(x: x, y: goals[1].minY))
-            LockIn.setSize(other, CGSize(width: area.maxX - x, height: goals[1].height))
+            guard area.maxX - x > 120 else { return false }
+            target = CGRect(x: x, y: goals[1].minY, width: area.maxX - x, height: goals[1].height)
+            // In whichever order keeps the in-between step off the edge of the screen, so it doesn't flicker.
+            if x >= (followedX ?? goals[1].minX) {
+                LockIn.setPosition(other.element, target.origin)
+                LockIn.setSize(other.element, target.size)
+            } else {
+                LockIn.setSize(other.element, target.size)
+                LockIn.setPosition(other.element, target.origin)
+            }
+            followedX = x
         } else {
             // The right window's left edge is the divider, while its right edge stays put.
-            guard abs(moved.maxX - goals[1].maxX) < 3 else { return }
+            guard abs(moved.maxX - goals[1].maxX) < 3 else { return false }
             let width = moved.minX - gap - area.minX
-            guard width > 120 else { return }
-            driving = element
-            lastFollow = now
-            LockIn.setSize(other, CGSize(width: width, height: goals[0].height))
+            guard width > 120 else { return false }
+            target = CGRect(x: goals[0].minX, y: goals[0].minY, width: width, height: goals[0].height)
+            LockIn.setSize(other.element, target.size)
         }
+        driving = element
+        // The edge goes with whichever of the two it's around, without asking the apps where they are.
+        if lit?.id == other.id { moveBorder(to: target) } else if lit?.id == panes[index].id { moveBorder(to: moved) }
+        return true
     }
 
     private func watch() {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         for pane in panes {
+            // Never wait long on an app that's busy, so dragging stays smooth.
+            AXUIElementSetMessagingTimeout(pane.element, 0.1)
             if observers[pane.pid] == nil {
                 var created: AXObserver?
                 guard AXObserverCreate(pane.pid, { _, element, notification, refcon in
@@ -463,19 +491,28 @@ private final class LockInSession {
             if panes.contains(where: { CFEqual($0.element, element) }) { onEnd() }
             return
         }
-        updateBorder()
-        if notification == kAXFocusedWindowChangedNotification { return }
+        if notification == kAXFocusedWindowChangedNotification { return updateBorder() }
+        scheduleSettle()
+        // While you drag one's inner edge, the other's own resizing (from following it) needs nothing more.
+        if let driving, !CFEqual(driving, element) { return }
+        // At most about sixty steps a second, so each is done before the next comes in.
+        let now = CACurrentMediaTime()
+        guard now - lastStep >= 1.0 / 60 else { return }
+        lastStep = now
         // While you drag one window's inner edge, the other follows it straight away.
-        if notification == kAXWindowResizedNotification, NSEvent.pressedMouseButtons != 0 {
-            follow(element)
-        }
-        // Wait until the mouse button is up, so it never fights a drag you're in the middle of.
+        if notification == kAXWindowResizedNotification, NSEvent.pressedMouseButtons != 0, follow(element) { return }
+        if let lit, CFEqual(lit.element, element) { moveBorder() }
+    }
+
+    /// Settles them shortly, once the mouse button is up, so it never fights a drag you're in the middle of.
+    private func scheduleSettle() {
         pendingFit?.cancel()
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, !self.ended else { return }
-                if NSEvent.pressedMouseButtons != 0 { return self.windowChanged(element, notification) }
+                if NSEvent.pressedMouseButtons != 0 { return self.scheduleSettle() }
                 self.driving = nil
+                self.followedX = nil
                 self.settle()
             }
         }
@@ -485,15 +522,24 @@ private final class LockInSession {
 
     // MARK: The glowing edge
 
-    /// Around whichever of the two you're using, while its desktop is showing; none otherwise.
+    /// Works out which of the two you're using, and puts the edge around it while its desktop is
+    /// showing; none otherwise.
     func updateBorder() {
         guard !ended, showing, BarSettings.lockInBorder,
               let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              let pane = focusedPane(of: front),
-              let frame = LockIn.frame(of: pane.element) else {
+              let pane = focusedPane(of: front) else {
+            lit = nil
             border?.orderOut(nil)
             return
         }
+        lit = pane
+        moveBorder()
+    }
+
+    /// Puts the edge around the window you're using: at `frame` (in the system's window
+    /// coordinates) when that's known already, or else where the window is.
+    private func moveBorder(to frame: CGRect? = nil) {
+        guard let lit, let frame = frame ?? LockIn.frame(of: lit.element) else { return }
         let border = self.border ?? BorderPanel()
         self.border = border
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
@@ -564,6 +610,6 @@ final class BorderPanel: NSPanel {
         outline.strokeColor = color.cgColor
         outline.shadowColor = color.cgColor
         CATransaction.commit()
-        orderFrontRegardless()
+        if !isVisible { orderFrontRegardless() }
     }
 }

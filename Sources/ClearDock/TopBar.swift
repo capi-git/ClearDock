@@ -90,6 +90,8 @@ final class TopBarModel: ObservableObject {
     @Published var lockIns: [UInt64: Date] = [:]
     /// The desktop whose two windows are being chosen for lock-in mode.
     @Published var lockInChoosing: UInt64?
+    /// Lock-in mode is getting a desktop's windows ready.
+    @Published var lockInStarting = false
     /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
     /// macOS menu bar sliding down underneath doesn't show through.
     @Published var backdropScreens = Set<String>()
@@ -274,6 +276,7 @@ final class TopBarController {
             let lockIns = self.lockIn.lockedIn
             if self.model.lockIns != lockIns { self.model.lockIns = lockIns }
             if self.model.lockInChoosing != self.lockIn.choosing { self.model.lockInChoosing = self.lockIn.choosing }
+            if self.model.lockInStarting != self.lockIn.starting { self.model.lockInStarting = self.lockIn.starting }
         }
         lockIn.accent = { [weak self] screen in
             guard let self else { return .systemPurple }

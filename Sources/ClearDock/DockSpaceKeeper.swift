@@ -30,6 +30,9 @@ final class DockSpaceKeeper {
 
     private var observers: [pid_t: AXObserver] = [:]
     private var watchedWindows = Set<CFHashCode>()
+    /// Windows that moved or changed size while a mouse button was down, looked at once it's up.
+    private var draggedElements: [CFHashCode: AXUIElement] = [:]
+    private var dragCheck: DispatchWorkItem?
     private var pending: [CFHashCode: DispatchWorkItem] = [:]
     private var workspaceTokens: [NSObjectProtocol] = []
 
@@ -118,6 +121,9 @@ final class DockSpaceKeeper {
         watchedWindows.removeAll()
         pending.values.forEach { $0.cancel() }
         pending.removeAll()
+        dragCheck?.cancel()
+        dragCheck = nil
+        draggedElements.removeAll()
         workspaceTokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         workspaceTokens.removeAll()
     }
@@ -162,6 +168,12 @@ final class DockSpaceKeeper {
 
     private func windowChanged(_ element: AXUIElement) {
         guard !slots.isEmpty else { return }
+        // While a mouse button is down (a window being dragged), only note it: asking the app about
+        // its window now would hold up the drag, and nothing is changed until the button is up anyway.
+        if NSEvent.pressedMouseButtons != 0 {
+            draggedElements[CFHash(element)] = element
+            return scheduleDragCheck()
+        }
         // The notification may name the app rather than a window; then check its focused window.
         let window: AXUIElement
         if role(of: element) == kAXWindowRole {
@@ -195,6 +207,23 @@ final class DockSpaceKeeper {
         }
         pending[key] = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Looks at the windows that changed during a drag once the mouse button is up.
+    private func scheduleDragCheck() {
+        guard dragCheck == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.dragCheck = nil
+                if NSEvent.pressedMouseButtons != 0 { return self.scheduleDragCheck() }
+                let elements = Array(self.draggedElements.values)
+                self.draggedElements.removeAll()
+                elements.forEach(self.windowChanged)
+            }
+        }
+        dragCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func fitAllWindows() {

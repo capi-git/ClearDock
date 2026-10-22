@@ -245,7 +245,7 @@ private struct LockInPill: View {
         let started = current.flatMap { model.lockIns[$0.id] }
         let choosing = current != nil && model.lockInChoosing == current?.id
         Pill(look: look, highlighted: started != nil, action: model.toggleLockIn) {
-            Image(systemName: started != nil ? "lock.fill" : choosing ? "rectangle.split.2x1" : "lock.open.fill")
+            Image(systemName: started != nil ? "lock.fill" : choosing ? "rectangle.split.2x1" : model.lockInStarting ? "hourglass" : "lock.open.fill")
                 .font(look.font(.bold, size: look.size.fontSize - 1))
                 .foregroundStyle(started != nil ? look.onAccent : Color(nsColor: look.accent))
             if let started {
@@ -253,7 +253,7 @@ private struct LockInPill: View {
                     Text("Locked in · " + Self.elapsed(since: started, at: context.date)).monospacedDigit()
                 }
             } else {
-                Text(choosing ? "Choose two…" : "Lock in")
+                Text(choosing ? "Choose two…" : model.lockInStarting ? "Locking in…" : "Lock in")
             }
         }
         .contextMenu {
