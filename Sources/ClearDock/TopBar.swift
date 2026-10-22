@@ -86,6 +86,10 @@ final class TopBarModel: ObservableObject {
     @Published var artColours: ArtColours?
     /// Screens whose bar is a thin line while a game is in front.
     @Published var thinScreens = Set<String>()
+    @Published var lockedIn = false
+    @Published var lockInStarting = false
+    @Published var lockInStarted: Date?
+    @Published var lockInApps: [String] = []
     /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
     /// macOS menu bar sliding down underneath doesn't show through.
     @Published var backdropScreens = Set<String>()
@@ -107,6 +111,9 @@ final class TopBarModel: ObservableObject {
     /// The pointer moved onto (or, with nil, off) a desktop or the song, for their pop-ups.
     var hoverDesktop: (Desktop?) -> Void = { _ in }
     var hoverSong: (Bool) -> Void = { _ in }
+    var toggleLockIn: () -> Void = {}
+    var setLockInApp: (Int, String) -> Void = { _, _ in }
+    var useDesktopForLockIn: () -> Void = {}
 
     /// The song's look: tinted with the album cover's colours, when that's on.
     func songLook(_ base: BarLook) -> BarLook {
@@ -214,6 +221,7 @@ final class TopBarController {
     /// Bars sliding away from a game right now.
     private var leaving = Set<CGDirectDisplayID>()
     private let popover = BarPopover()
+    private let lockIn = LockIn()
 
     init() {
         nowPlaying.onChange = { [weak self] in
@@ -262,6 +270,35 @@ final class TopBarController {
         model.previousSong = { [weak self] in self?.nowPlaying.previous() }
         model.seek = { [weak self] seconds in self?.nowPlaying.seek(to: seconds) }
         model.hoverDesktop = { [weak self] desktop in self?.hoverDesktop(desktop) }
+        lockIn.onChange = { [weak self] in
+            guard let self else { return }
+            self.model.lockedIn = self.lockIn.isOn
+            self.model.lockInStarting = self.lockIn.isStarting
+            self.model.lockInStarted = self.lockIn.started
+        }
+        lockIn.barBottom = { [weak self] screen in
+            self?.barFrame(on: screen, replacesMenuBar: BarSettings.takesMenuBarsPlace).minY ?? screen.frame.maxY
+        }
+        lockIn.accent = { [weak self] screen in
+            guard let self else { return .systemPurple }
+            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen?.displayUUID ?? "Main")
+            return self.model.look(for: key).accent
+        }
+        model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
+        model.setLockInApp = { index, bundle in
+            var apps = BarSettings.lockInApps
+            while apps.count < 2 { apps.append("") }
+            apps[index] = bundle
+            BarSettings.lockInApps = apps
+            NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+        }
+        model.useDesktopForLockIn = { [weak self] in
+            guard let self else { return }
+            let mouse = NSEvent.mouseLocation
+            let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen?.displayUUID ?? "Main")
+            BarSettings.lockInDesktop = self.model.desktops[key]?.first(where: \.isCurrent)?.key
+        }
         model.hoverSong = { [weak self] inside in self?.hoverSong(inside) }
         model.hide = { kind in
             BarSettings.items = BarSettings.items.map { $0.kind == kind ? BarItem(kind: $0.kind, side: $0.side, isOn: false) : $0 }
@@ -274,6 +311,11 @@ final class TopBarController {
         settingsChanged()
     }
 
+    /// Clear Dock is quitting: put back the apps lock-in mode hid.
+    func prepareForQuit() {
+        lockIn.exit()
+    }
+
     func settingsChanged() {
         applyMenuBarSetting()
         guard BarSettings.enabled else { return stop() }
@@ -281,6 +323,7 @@ final class TopBarController {
         model.items = BarSettings.items
         model.desktopNames = BarSettings.desktopNames
         model.desktopColours = BarSettings.desktopColours
+        model.lockInApps = BarSettings.lockInApps
         applyLook()
         refreshWallpaperColors()
         layout()
@@ -381,6 +424,7 @@ final class TopBarController {
         revealTimer?.invalidate()
         revealTimer = nil
         endHold()
+        lockIn.exit()
         exposeTimer?.invalidate()
         exposeTimer = nil
         exposeScreens.removeAll()

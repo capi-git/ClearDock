@@ -2,12 +2,13 @@ import AppKit
 
 /// One thing the top bar can show.
 enum BarItemKind: String, CaseIterable, Identifiable {
-    case desktops, app, song, volume, battery, clock
+    case desktops, app, lockIn, song, volume, battery, clock
     var id: String { rawValue }
     var title: String {
         switch self {
         case .desktops: "Desktops"
         case .app: "App in front"
+        case .lockIn: "Lock-in mode"
         case .song: "Song playing"
         case .volume: "Volume"
         case .battery: "Battery"
@@ -18,6 +19,7 @@ enum BarItemKind: String, CaseIterable, Identifiable {
         switch self {
         case .desktops: "square.split.2x2"
         case .app: "macwindow"
+        case .lockIn: "lock.fill"
         case .song: "music.note"
         case .volume: "speaker.wave.2.fill"
         case .battery: "battery.75percent"
@@ -142,6 +144,7 @@ enum BarSettings {
     static let defaultItems: [BarItem] = [
         BarItem(kind: .desktops, side: .left, isOn: true),
         BarItem(kind: .app, side: .left, isOn: true),
+        BarItem(kind: .lockIn, side: .left, isOn: true),
         BarItem(kind: .song, side: .right, isOn: true),
         BarItem(kind: .volume, side: .right, isOn: true),
         BarItem(kind: .battery, side: .right, isOn: true),
@@ -258,6 +261,49 @@ enum BarSettings {
     static var menuBarDelay: Double {
         get { defaults.object(forKey: "bar.menuBarDelay") == nil ? 1 : min(3, max(0.2, defaults.double(forKey: "bar.menuBarDelay"))) }
         set { defaults.set(newValue, forKey: "bar.menuBarDelay") }
+    }
+
+    // MARK: Lock-in mode
+
+    /// The two apps, left then right, by bundle identifier.
+    static var lockInApps: [String] {
+        get { defaults.stringArray(forKey: "lockIn.apps") ?? [] }
+        set { defaults.set(newValue, forKey: "lockIn.apps") }
+    }
+
+    /// The desktop lock-in mode uses, by its id. The first time, it's the one you're on.
+    static var lockInDesktop: String? {
+        get { defaults.string(forKey: "lockIn.desktop") }
+        set { defaults.set(newValue, forKey: "lockIn.desktop") }
+    }
+
+    /// How much of the width the left app gets.
+    static var lockInSplit: Double {
+        get { defaults.object(forKey: "lockIn.split") == nil ? 0.5 : min(0.8, max(0.2, defaults.double(forKey: "lockIn.split"))) }
+        set { defaults.set(newValue, forKey: "lockIn.split") }
+    }
+
+    /// The gap around and between the two apps, where the wallpaper shows.
+    static var lockInGap: Double {
+        get { defaults.object(forKey: "lockIn.gap") == nil ? 12 : defaults.double(forKey: "lockIn.gap") }
+        set { defaults.set(newValue, forKey: "lockIn.gap") }
+    }
+
+    static var lockInHideOthers: Bool {
+        get { defaults.object(forKey: "lockIn.hideOthers") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "lockIn.hideOthers") }
+    }
+
+    /// A glowing edge around the one you're using.
+    static var lockInBorder: Bool {
+        get { defaults.object(forKey: "lockIn.border") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "lockIn.border") }
+    }
+
+    /// A picture to use as the lock-in desktop's wallpaper, or nil to leave it as it is.
+    static var lockInWallpaper: String? {
+        get { defaults.string(forKey: "lockIn.wallpaper") }
+        set { defaults.set(newValue, forKey: "lockIn.wallpaper") }
     }
 
     static var gameMode: GameMode {

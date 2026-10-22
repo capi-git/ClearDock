@@ -92,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        topBar?.prepareForQuit()
         // Across a restart, keep the macOS Dock hidden only if Clear Dock will reopen at login.
         if poweringOff && LoginItem.isEnabled { return }
         SystemDock.restore()

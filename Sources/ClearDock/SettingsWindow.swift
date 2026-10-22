@@ -168,6 +168,43 @@ final class SettingsStore: ObservableObject {
     @Published var gameMode = GameMode.slide { didSet { edit(keepsTheme: true) { BarSettings.gameMode = gameMode } } }
     @Published var menuBarDelay = 1.0 { didSet { edit(keepsTheme: true) { BarSettings.menuBarDelay = menuBarDelay } } }
 
+    // Lock-in mode
+    @Published var lockInLeft = "" { didSet { edit(keepsTheme: true) { BarSettings.lockInApps = [lockInLeft, lockInRight] } } }
+    @Published var lockInRight = "" { didSet { edit(keepsTheme: true) { BarSettings.lockInApps = [lockInLeft, lockInRight] } } }
+    @Published var lockInHideOthers = true { didSet { edit(keepsTheme: true) { BarSettings.lockInHideOthers = lockInHideOthers } } }
+    @Published var lockInBorder = true { didSet { edit(keepsTheme: true) { BarSettings.lockInBorder = lockInBorder } } }
+    @Published var lockInGap = 12.0 { didSet { edit(keepsTheme: true) { BarSettings.lockInGap = lockInGap } } }
+    @Published var lockInWallpaper: String? { didSet { edit(keepsTheme: true) { BarSettings.lockInWallpaper = lockInWallpaper } } }
+    @Published var lockInDesktopName = "Chosen the first time you lock in"
+    @Published var appChoices: [LockInChoices.App] = []
+
+    func useCurrentDesktopForLockIn() {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.screens.first
+        let desktops = DesktopReader.read()
+        let mine = desktops[screen?.displayUUID ?? "Main"] ?? desktops["Main"] ?? []
+        guard let current = mine.first(where: \.isCurrent) else { return }
+        BarSettings.lockInDesktop = current.key
+        loadLockInDesktop()
+    }
+
+    func chooseLockInWallpaper() {
+        let panel = NSOpenPanel()
+        panel.title = "Wallpaper for Lock-In"
+        panel.allowedContentTypes = [.image]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        lockInWallpaper = url.path
+    }
+
+    private func loadLockInDesktop() {
+        let desktops = DesktopReader.read().values.flatMap { $0 }
+        if let key = BarSettings.lockInDesktop, let desktop = desktops.first(where: { $0.key == key }) {
+            lockInDesktopName = BarSettings.desktopNames[key] ?? "Desktop \(desktop.number)"
+        } else {
+            lockInDesktopName = "Chosen the first time you lock in"
+        }
+    }
+
     /// Your desktops, for naming and colouring them.
     struct DesktopRow: Identifiable {
         let id: String
@@ -310,6 +347,15 @@ final class SettingsStore: ObservableObject {
         miniPlayer = BarSettings.miniPlayer
         gameMode = BarSettings.gameMode
         menuBarDelay = BarSettings.menuBarDelay
+        let lockInApps = BarSettings.lockInApps
+        lockInLeft = lockInApps.first ?? ""
+        lockInRight = lockInApps.count > 1 ? lockInApps[1] : ""
+        lockInHideOthers = BarSettings.lockInHideOthers
+        lockInBorder = BarSettings.lockInBorder
+        lockInGap = BarSettings.lockInGap
+        lockInWallpaper = BarSettings.lockInWallpaper
+        appChoices = LockInChoices.all()
+        loadLockInDesktop()
         loadDesktops()
         loadCustomIcons()
         refreshStatus()
@@ -669,6 +715,39 @@ private struct TopBarTab: View {
                 }
                 .pickerStyle(.segmented)
                 Slider(value: $store.barCornerRadius, in: 0...15) { Text("Corner rounding") }
+            }
+
+            Section {
+                Picker("Left app", selection: $store.lockInLeft) {
+                    Text("Choose…").tag("")
+                    ForEach(store.appChoices, id: \.bundle) { Text($0.name).tag($0.bundle) }
+                }
+                Picker("Right app", selection: $store.lockInRight) {
+                    Text("Choose…").tag("")
+                    ForEach(store.appChoices, id: \.bundle) { Text($0.name).tag($0.bundle) }
+                }
+                LabeledContent("Lock-in desktop") {
+                    HStack {
+                        Text(store.lockInDesktopName).foregroundStyle(.secondary)
+                        Button("Use the Current Desktop") { store.useCurrentDesktopForLockIn() }
+                    }
+                }
+                LabeledContent("Wallpaper") {
+                    HStack {
+                        Text(store.lockInWallpaper.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Leave as it is")
+                            .foregroundStyle(.secondary).lineLimit(1)
+                        Button("Choose…") { store.chooseLockInWallpaper() }
+                        if store.lockInWallpaper != nil { Button("Clear") { store.lockInWallpaper = nil } }
+                    }
+                }
+                Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
+                Toggle("Hide other apps while locked in", isOn: $store.lockInHideOthers)
+                Toggle("Glowing edge around the app you're using", isOn: $store.lockInBorder)
+            } header: {
+                Text("Lock-in mode")
+            } footer: {
+                Text("Click Lock In in the bar to go to your lock-in desktop with these two apps side by side. Drag the edge between them to share the screen differently, or drag one onto the other's side to swap them. Click again to unlock and bring your other apps back. An app with no window on the lock-in desktop is asked for a new one, since macOS doesn't let apps move windows between desktops.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Song playing") {
