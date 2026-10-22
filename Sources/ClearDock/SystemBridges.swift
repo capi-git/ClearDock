@@ -124,6 +124,15 @@ enum WindowSpaces {
         return copyDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]] ?? []
     }
 
+    /// The desktop (or full-screen app) showing on a screen right now, by the window server's id.
+    @MainActor static func currentSpaceID(on screen: NSScreen) -> UInt64? {
+        let displays = displaySpaces()
+        let display = displays.first { ($0["Display Identifier"] as? String) == screen.displayUUID }
+            ?? displays.first { ($0["Display Identifier"] as? String) == "Main" }
+        let current = display?["Current Space"] as? [String: Any]
+        return ((current?["id64"] ?? current?["ManagedSpaceID"]) as? NSNumber)?.uint64Value
+    }
+
     /// The desktop (or full-screen app) showing on each display right now, by the window server's ids.
     static func currentSpaceIDs() -> Set<UInt64> {
         Set(displaySpaces().compactMap { display in
@@ -225,6 +234,19 @@ enum BarSpace {
         guard window.windowNumber > 0, let space,
               let add = symbol("CGSAddWindowsToSpaces", AddWindows.self) else { return }
         add(space.connection, [NSNumber(value: window.windowNumber)] as CFArray, [NSNumber(value: space.id)] as CFArray)
+    }
+}
+
+/// The windows on screen, by number only, which is several times cheaper to ask for than their details.
+enum OnScreenWindows {
+    private typealias ListCreate = @convention(c) (UInt32, UInt32) -> Unmanaged<CFArray>?
+    /// Not offered to Swift directly, though it's public.
+    private static let create: ListCreate? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreate")
+        .map { unsafeBitCast($0, to: ListCreate.self) }
+
+    static func numbers() -> [UInt] {
+        guard let create, let list = create(CGWindowListOption.optionOnScreenOnly.rawValue, 0)?.takeRetainedValue() else { return [] }
+        return (0..<CFArrayGetCount(list)).map { UInt(bitPattern: CFArrayGetValueAtIndex(list, $0)) }
     }
 }
 

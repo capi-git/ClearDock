@@ -28,13 +28,22 @@ final class WallpaperPalette {
         task = Task { @MainActor [weak self] in
             guard let image = await Self.wallpaperImage(for: screen) else { return }
             guard let self, !Task.isCancelled, let colors = Self.colors(in: image) else { return }
-            if colors.base.hexString == self.base.hexString && colors.top.hexString == self.top.hexString
-                && colors.accents.map(\.hexString) == self.accents.map(\.hexString) { return }
+            // A live wallpaper (from an app like Wallspace) looks a little different each time it's
+            // looked at; only a real change of wallpaper should change the colours.
+            if Self.near(colors.base, self.base) && Self.near(colors.top, self.top)
+                && Self.near(colors.accents.first ?? Self.fallbackAccent, self.accent) { return }
             self.base = colors.base
             self.top = colors.top
             self.accents = colors.accents
             NotificationCenter.default.post(name: Self.didChange, object: nil)
         }
+    }
+
+    /// Whether two colours look about the same.
+    private static func near(_ a: NSColor, _ b: NSColor) -> Bool {
+        guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        let dr = a.redComponent - b.redComponent, dg = a.greenComponent - b.greenComponent, db = a.blueComponent - b.blueComponent
+        return (dr * dr + dg * dg + db * db).squareRoot() < 0.12
     }
 
     /// A small picture of the desktop with no windows on it.

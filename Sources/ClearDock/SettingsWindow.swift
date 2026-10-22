@@ -682,7 +682,7 @@ private struct TopBarTab: View {
             Section {
                 Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
                 Toggle("Tuck away other windows on the lock-in desktop", isOn: $store.lockInHideOthers)
-                Toggle("Glowing edge around the app you're using", isOn: $store.lockInBorder)
+                Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
             } header: {
                 Text("Lock-in mode")
             } footer: {

@@ -364,6 +364,9 @@ private struct SoundBars: NSViewRepresentable {
                 bounce.autoreverses = true
                 bounce.repeatCount = .infinity
                 bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                // A low frame rate is plenty for these, and spares the screen being redrawn
+                // up to 120 times a second for as long as music plays.
+                bounce.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 24, preferred: 20)
                 piece.add(bounce, forKey: "bounce")
                 layer.addSublayer(piece)
             }

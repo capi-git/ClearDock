@@ -78,6 +78,8 @@ final class DockController {
     private let spaceKeeper = DockSpaceKeeper.shared
     /// True while the app in front is in full screen; the dock then tucks away like the macOS Dock.
     private var fullScreenFront = false
+    /// True while the desktop showing on the dock's screen is locked in; the dock then tucks away too.
+    private var lockedIn = false
     /// Kept on screen while the settings window is open, so changes can be seen as they happen.
     var keepVisible = false {
         didSet { if keepVisible != oldValue { settingsChanged() } }
@@ -134,7 +136,10 @@ final class DockController {
         for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification] {
             workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    if name == NSWorkspace.activeSpaceDidChangeNotification { self?.refreshWallpaperColors() }
+                    if name == NSWorkspace.activeSpaceDidChangeNotification {
+                        self?.refreshWallpaperColors()
+                        self?.checkLockIn()
+                    }
                     self?.checkFullScreen()
                     // Going full screen animates for a moment; look again once it has settled.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -144,10 +149,22 @@ final class DockController {
             }
         }
 
+        NotificationCenter.default.addObserver(forName: LockIn.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkLockIn() }
+        }
+
         model.reload()
         applyMode()
         refreshWallpaperColors()
         view.applyPreviewHover()
+    }
+
+    private func checkLockIn() {
+        let now = !LockIn.lockedSpaces.isEmpty
+            && currentScreen.flatMap(WindowSpaces.currentSpaceID(on:)).map(LockIn.lockedSpaces.contains) == true
+        guard now != lockedIn else { return }
+        lockedIn = now
+        applyMode()
     }
 
     private func refreshWallpaperColors() {
@@ -195,7 +212,7 @@ final class DockController {
     /// Clear Dock sits beside a visible Apple Dock instead of on top of it. Sliding in from
     /// the screen edge would mean passing through Apple's Dock, so it stays put in that case.
     private var autoHides: Bool {
-        guard !keepVisible, Settings.autoHide || fullScreenFront else { return false }
+        guard !keepVisible, Settings.autoHide || fullScreenFront || lockedIn else { return false }
         return NSScreen.screens.allSatisfy { appleDockInset(on: $0) == 0 }
     }
 

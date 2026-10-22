@@ -222,6 +222,8 @@ final class TopBarController {
     private var leaving = Set<CGDirectDisplayID>()
     private let popover = BarPopover()
     private let lockIn = LockIn()
+    /// The windows on screen at the last look for Mission Control.
+    private var onScreenNumbers: [UInt] = []
     private let lockInPicker = LockInPicker()
 
     init() {
@@ -318,6 +320,7 @@ final class TopBarController {
         model.desktopColours = BarSettings.desktopColours
         // Without its piece in the bar there'd be no way to unlock.
         if !BarSettings.items.contains(where: { $0.kind == .lockIn && $0.isOn }) { lockIn.endAll() }
+        lockIn.settingsChanged()
         applyLook()
         refreshWallpaperColors()
         layout()
@@ -423,6 +426,7 @@ final class TopBarController {
         exposeTimer?.invalidate()
         exposeTimer = nil
         exposeScreens.removeAll()
+        onScreenNumbers = []
         fullScreenScreens.removeAll()
         inBarSpace.removeAll()
         backdropTask?.cancel()
@@ -570,6 +574,10 @@ final class TopBarController {
     }
 
     private func checkExpose() {
+        // Only look closer when the windows on screen have changed: Mission Control adds its own.
+        let numbers = OnScreenWindows.numbers()
+        guard numbers != onScreenNumbers || numbers.isEmpty else { return }
+        onScreenNumbers = numbers
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         var open = Set<CGDirectDisplayID>()
         for info in windows where info[kCGWindowOwnerName as String] as? String == "WindowManager" && info[kCGWindowLayer as String] as? Int == 19 {
