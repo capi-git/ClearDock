@@ -13,6 +13,8 @@ import AppKit
 final class DockSpaceKeeper {
     /// Shared by the dock and the top bar, so each window is only watched once.
     static let shared = DockSpaceKeeper()
+    /// Posted when the room kept for the dock or the bar changes.
+    static let didChange = Notification.Name("ClearDockKeptRoomChanged")
 
     /// The strips each part of Clear Dock has asked for ("dock" and "bar").
     private var slots: [String: [KeptStrip]] = [:]
@@ -47,7 +49,10 @@ final class DockSpaceKeeper {
         let changed = (slots[slot] ?? []) != new
         slots[slot] = new.isEmpty ? nil : new
         let strips = strips
-        if changed { watcher.use(strips) }
+        if changed {
+            watcher.use(strips)
+            NotificationCenter.default.post(name: Self.didChange, object: nil)
+        }
         guard AXIsProcessTrusted() else { return stop() }
         guard !strips.isEmpty else {
             // Often only for a while (a full-screen app or game in front): the apps stay watched,

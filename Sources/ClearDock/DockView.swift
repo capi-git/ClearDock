@@ -111,7 +111,9 @@ final class DockView: NSView {
     func update(animated: Bool, offset: CGFloat = 0) {
         guard let root = layer else { return }
         let layout = model.layout
-        let pixels = Int((layout.iconSize * scale).rounded())
+        // Drawn as big as they get when magnified, so they stay sharp then.
+        let largest = Appearance.hoverEffect == .magnify ? CGFloat(Appearance.magnifyScale) : 1
+        let pixels = Int((layout.iconSize * scale * largest).rounded())
         var seen = Set<String>()
         var renderedAny = false
 

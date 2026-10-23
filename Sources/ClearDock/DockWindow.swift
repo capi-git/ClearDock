@@ -255,7 +255,9 @@ final class DockController {
     }
 
     func settingsChanged() {
-        if let screen, !NSScreen.screens.contains(screen) { self.screen = nil }
+        // macOS can hand out new screen objects after a display change or sleep: find the dock's
+        // screen again by its display, rather than losing it and going back to the main screen.
+        if let id = screen?.displayID { screen = NSScreen.screens.first { $0.displayID == id } }
         Appearance.reload()
         applyBackground()
         refreshWallpaperColors(unlessRecent: true)
@@ -406,7 +408,7 @@ final class DockController {
         guard let screen else { return }
         if !shown { dockLog.notice("Dock: showing (\(reason, privacy: .public))") }
         cancelHide()
-        let movedScreen = self.screen != screen
+        let movedScreen = self.screen?.displayID != screen.displayID
         if !shown || movedScreen {
             self.screen = screen
             view.scale = screen.backingScaleFactor
@@ -624,7 +626,14 @@ final class DockController {
             case .right: NSRect(x: s.maxX - 1, y: (s.midY - length / 2).rounded(), width: 1, height: length)
             }
             trigger.setFrame(rect, display: false)
-            if !shown { trigger.orderFrontRegardless() }
+            // Not where this edge meets another screen: the pointer crosses there on its way over.
+            let beyond = rect.offsetBy(dx: edge == .left ? -1 : edge == .right ? 1 : 0, dy: edge == .bottom ? -1 : 0)
+            let shared = screens.contains { $0 !== screen && $0.frame.intersects(beyond) }
+            if shared {
+                trigger.orderOut(nil)
+            } else if !shown {
+                trigger.orderFrontRegardless()
+            }
         }
     }
 

@@ -142,7 +142,7 @@ final class SettingsStore: ObservableObject {
         didSet {
             edit(keepsTheme: true) {
                 Settings.hideSystemDock = hideSystemDock
-                if hideSystemDock { SystemDock.hide() } else { SystemDock.restore() }
+                if hideSystemDock { SystemDock.hide() } else { SystemDock.restore(waiting: false) }
             }
         }
     }
@@ -207,13 +207,31 @@ final class SettingsStore: ObservableObject {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    /// Looked up once each: these ask Launch Services, and a settings page is drawn again at every
+    /// step of a slider.
+    private static var names: [String: String] = [:]
+    private static var icons: [String: NSImage?] = [:]
+
     static func appName(_ bundle: String) -> String {
-        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
+        if let name = names[bundle] { return name }
+        let name = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
             .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? bundle
+        names[bundle] = name
+        return name
     }
 
     static func appIcon(_ bundle: String) -> NSImage? {
-        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle).map { NSWorkspace.shared.icon(forFile: $0.path) }
+        if let icon = icons[bundle] { return icon }
+        let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle).map { NSWorkspace.shared.icon(forFile: $0.path) }
+        icons[bundle] = icon
+        return icon
+    }
+
+    static func fileIcon(_ path: String) -> NSImage {
+        if let icon = icons[path], let icon { return icon }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        icons[path] = icon
+        return icon
     }
 
     /// Your desktops, for naming and colouring them. Read when the Desktops tab is shown.
@@ -446,7 +464,7 @@ final class SettingsStore: ObservableObject {
         save()
         if !keepsTheme {
             Appearance.theme = nil
-            theme = nil
+            if theme != nil { theme = nil }
         }
         schedule(.dock)
     }
@@ -670,7 +688,7 @@ private struct LookTab: View {
                 } else {
                     ForEach(store.customIcons) { icon in
                         HStack {
-                            Image(nsImage: NSWorkspace.shared.icon(forFile: icon.path))
+                            Image(nsImage: SettingsStore.fileIcon(icon.path))
                                 .resizable().frame(width: 22, height: 22)
                             Text(icon.name)
                             Spacer()

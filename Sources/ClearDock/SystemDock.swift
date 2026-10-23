@@ -47,30 +47,37 @@ enum SystemDock {
         return value(key) as? NSNumber
     }
 
+    /// Hides the macOS Dock. All the work, from noting the Dock's own settings to restarting it,
+    /// happens on `queue`, one step after another, so turning it off and on again quickly can't
+    /// note the wrong settings (ones Clear Dock had changed) as the Dock's own.
     static func hide() {
-        // Record each setting's value before changing it, once. A setting already changed
-        // but not recorded (from an older Clear Dock) can only have been unset before.
-        let defaults = UserDefaults.standard
-        var saved = defaults.dictionary(forKey: savedKey) ?? [:]
-        for o in overrides where saved[o.key] == nil {
-            saved[o.key] = isApplied(o) ? notSet : (value(o.key) ?? notSet)
-        }
-        defaults.set(saved, forKey: savedKey)
-
-        let writes = overrides.filter { !isApplied($0) }.map { ["write", "com.apple.dock", $0.key, $0.type, $0.value] }
-        guard !writes.isEmpty else { return }
         queue.async {
+            // Record each setting's value before changing it, once. A setting already changed
+            // but not recorded (from an older Clear Dock) can only have been unset before.
+            let defaults = UserDefaults.standard
+            var saved = defaults.dictionary(forKey: savedKey) ?? [:]
+            for o in overrides where saved[o.key] == nil {
+                saved[o.key] = isApplied(o) ? notSet : (value(o.key) ?? notSet)
+            }
+            defaults.set(saved, forKey: savedKey)
+
+            let writes = overrides.filter { !isApplied($0) }.map { ["write", "com.apple.dock", $0.key, $0.type, $0.value] }
+            guard !writes.isEmpty else { return }
             for arguments in writes { run("/usr/bin/defaults", arguments) }
             restartDock()
         }
     }
 
-    static func restore() {
-        let defaults = UserDefaults.standard
-        guard let saved = defaults.dictionary(forKey: savedKey) else { return }
-        // Here, and waiting for a hide still under way: Clear Dock may be about to quit.
-        queue.sync { restore(saved) }
-        defaults.removeObject(forKey: savedKey)
+    /// Puts the macOS Dock back as it was. Clear Dock quitting waits for it (and for a hide still
+    /// under way); turning the setting off doesn't.
+    static func restore(waiting: Bool = true) {
+        let work = {
+            let defaults = UserDefaults.standard
+            guard let saved = defaults.dictionary(forKey: savedKey) else { return }
+            restore(saved)
+            defaults.removeObject(forKey: savedKey)
+        }
+        if waiting { queue.sync(execute: work) } else { queue.async(execute: work) }
     }
 
     private static func restore(_ saved: [String: Any]) {

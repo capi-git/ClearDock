@@ -89,7 +89,7 @@ enum SettingsMenu {
         menu.addItem(replaceItem)
         menu.addItem(ActionMenuItem("Hide the macOS Dock", checked: Settings.hideSystemDock) {
             Settings.hideSystemDock.toggle()
-            if Settings.hideSystemDock { SystemDock.hide() } else { SystemDock.restore() }
+            if Settings.hideSystemDock { SystemDock.hide() } else { SystemDock.restore(waiting: false) }
             // The macOS Dock takes a moment to restart; then make room for it, or reclaim the space.
             changed()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {

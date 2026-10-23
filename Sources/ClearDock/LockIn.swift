@@ -181,10 +181,19 @@ final class LockIn {
         for session in sessions.values { session.showDecorationsAgain() }
     }
 
-    /// The gap or the glowing edge setting changed.
+    /// A bar setting changed. Only a different gap moves the windows; the glow setting only
+    /// redraws round them, and anything else (the clock, a desktop's name) changes neither.
     func settingsChanged() {
-        for session in sessions.values { session.refit() }
+        let now = (gap: BarSettings.lockInGap, border: BarSettings.lockInBorder)
+        defer { appliedSettings = now }
+        guard let before = appliedSettings else { return }
+        if now.gap != before.gap {
+            for session in sessions.values { session.refit() }
+        } else if now.border != before.border {
+            for session in sessions.values { session.showDecorationsAgain() }
+        }
     }
+    private var appliedSettings: (gap: Double, border: Bool)?
 
     private func publish() {
         Self.lockedSpaces = Set(sessions.keys)
@@ -228,8 +237,10 @@ final class LockIn {
             tokens = [
                 // An app coming forward is usually one opening a window: look straight away, and
                 // again once it's had a moment.
-                center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+                center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+                    let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
                     MainActor.assumeIsolated {
+                        if let pid { self?.sessions.values.forEach { $0.noteInFront(pid) } }
                         for delay in [0.3, 1.2] {
                             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                                 MainActor.assumeIsolated { self?.moveNewcomers() }
@@ -243,6 +254,10 @@ final class LockIn {
                 // A screen unplugged or changed: its desktops' lock-ins end, or fit the new size.
                 NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.screensChanged() }
+                },
+                // The dock or the bar started or stopped keeping room: the two take the space there is now.
+                NotificationCenter.default.addObserver(forName: DockSpaceKeeper.didChange, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.roomChanged() }
                 },
                 center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
                     let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
@@ -294,8 +309,14 @@ final class LockIn {
     private func screensChanged() {
         for session in Array(sessions.values) {
             if session.screen == nil {
-                // Its windows have moved to another screen, onto whatever desktop shows there.
-                end(session, now: true)
+                // Gone for good, rather than for a moment (a display sleeping, a monitor reconnecting):
+                // its windows have moved to another screen, onto whatever desktop shows there.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.sessions[session.space] === session else { return }
+                        if session.screen == nil { self.end(session, now: true) } else { session.refit() }
+                    }
+                }
             } else {
                 session.refit()
             }
@@ -304,6 +325,18 @@ final class LockIn {
 
     private func moveNewcomers() {
         for session in sessions.values where session.showing { session.moveNewcomers() }
+    }
+
+    private var pendingRefit: DispatchWorkItem?
+
+    /// A moment after the room kept changes (it often changes in a few steps), refits the two.
+    private func roomChanged() {
+        pendingRefit?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.sessions.values.forEach { $0.refit() } }
+        }
+        pendingRefit = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     /// One of the two apps quit, so that desktop's lock-in is over.
@@ -499,10 +532,18 @@ private final class LockInSession {
     /// Where the two were last known to be, kept while the glow is put away (on another desktop, or
     /// in Mission Control), so it can come back without asking the apps where they are.
     private var knownFrames: [CGRect]?
+    /// The windows on screen at the last look for newcomers.
+    private var lastLookedAt: [UInt] = []
+    /// Counts drags of the edge, so what's left over from one let go of just before doesn't act
+    /// on the next.
+    private var drag = 0
+    /// The edge is held right now (between taking hold of it and letting go).
+    private var holding = false
     /// How narrow each app has shown it will go, by window, for those that won't go as narrow as asked.
     private var minimumWidths: [CGWindowID: CGFloat] = [:]
 
-    private static let windowNotifications = [kAXWindowMovedNotification, kAXWindowResizedNotification, kAXUIElementDestroyedNotification]
+    private static let windowNotifications = [kAXWindowMovedNotification, kAXWindowResizedNotification, kAXUIElementDestroyedNotification,
+                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
 
     init(space: UInt64, display: CGDirectDisplayID, panes: [Pane]) {
         self.space = space
@@ -517,6 +558,19 @@ private final class LockInSession {
     var screen: NSScreen? { NSScreen.screens.first { $0.displayID == display } }
 
     func involves(_ pid: pid_t) -> Bool { panes.contains { $0.pid == pid } }
+
+    /// The one of the two you were last using.
+    private var lastUsed = 0
+
+    func noteInFront(_ pid: pid_t) {
+        if let index = panes.firstIndex(where: { $0.pid == pid }) { lastUsed = index }
+    }
+
+    /// Brings back the one of the two you were using.
+    private func raiseLastUsed() {
+        let pane = panes[min(lastUsed, panes.count - 1)]
+        WindowFocus.raise(pane.id, of: pane.pid)
+    }
 
     func begin() {
         watch()
@@ -590,13 +644,15 @@ private final class LockInSession {
     }
 
     private func fit() {
-        for (pane, target) in zip(panes, targets) {
+        let goals = targets
+        for (pane, target) in zip(panes, goals) {
             guard let frame = LockIn.frame(of: pane.element), !Self.close(frame, target) else { continue }
             // Size, place, and size again: some apps only accept a size that fits where they are.
             Self.setSize(pane.element, target.size)
             Self.setPosition(pane.element, target.origin)
             Self.setSize(pane.element, target.size)
         }
+        if goals.count == 2 { knownFrames = goals }
         updateDecorations()
     }
 
@@ -616,9 +672,9 @@ private final class LockInSession {
             // Some apps have a smallest size; remember it, so dragging the edge stops there.
             if left.width > goals[0].width + 16 { minimumWidths[panes[0].id] = left.width }
             if right.width > goals[1].width + 16 { minimumWidths[panes[1].id] = right.width }
-            if abs(left.minX - goals[0].minX) < 3 && abs(left.maxX - goals[0].maxX) > 3 && abs(left.width - goals[0].width) > 3 {
+            if abs(left.minX - goals[0].minX) < 3 && abs(left.maxX - goals[0].maxX) > 16 && abs(left.width - goals[0].width) > 16 {
                 BarSettings.lockInSplit = Self.clampSplit((left.maxX - area.minX) / usable)
-            } else if abs(right.maxX - goals[1].maxX) < 3 && abs(right.minX - goals[1].minX) > 3 && abs(right.width - goals[1].width) > 3 {
+            } else if abs(right.maxX - goals[1].maxX) < 3 && abs(right.minX - goals[1].minX) > 16 && abs(right.width - goals[1].width) > 16 {
                 BarSettings.lockInSplit = Self.clampSplit((right.minX - gap - area.minX) / usable)
             } else if abs(right.minX - goals[1].minX) < 3 && right.width > goals[1].width + 16 {
                 // The right one would reach off the screen: give it the room it needs.
@@ -639,6 +695,10 @@ private final class LockInSession {
 
     private func dividerGrabbed(at offset: CGFloat) {
         guard !ended, let area, let frames = drawnFrames ?? currentFrames() else { return }
+        // Taken hold of again before the last drag had finished: that one's covers go now.
+        overlay?.finish()
+        drag += 1
+        holding = true
         movers.forEach { $0.forget() }
         dragging = true
         dividerMoved = false
@@ -650,6 +710,11 @@ private final class LockInSession {
                                   color: accent(), glow: BarSettings.lockInBorder,
                                   frostedCovers: BarSettings.lockInFrostedCovers) { [weak self] in
             guard let self, self.dividerMoved else { return nil }
+            // Let go without the edge hearing of it (Mission Control opening mid-drag, say).
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.dividerReleased() } }
+                return nil
+            }
             return self.split(at: NSEvent.mouseLocation.x - self.grabOffset)?.map(Self.flipped)
         }
         overlay.move(frames.map(Self.flipped))
@@ -674,11 +739,16 @@ private final class LockInSession {
     }
 
     private func dividerReleased() {
+        guard holding else { return }
+        holding = false
         let overlay = self.overlay
         self.overlay = nil
         // Where you let go.
         if dividerMoved { _ = split(at: NSEvent.mouseLocation.x - grabOffset) }
-        guard dividerMoved, let width = draggedWidth, let area, panes.count == 2 else {
+        let moved = dividerMoved
+        // The covers stay where you let go, rather than following the pointer while the apps resize.
+        dividerMoved = false
+        guard moved, let width = draggedWidth, let area, panes.count == 2 else {
             // Taken hold of without being moved.
             overlay?.finish()
             dragging = false
@@ -691,16 +761,23 @@ private final class LockInSession {
         // Now the apps resize, once each, out of sight under the covers.
         let goals = [CGRect(x: area.minX, y: area.minY, width: width, height: area.height),
                      CGRect(x: area.minX + width + gap, y: area.minY, width: area.width - width - gap, height: area.height)]
+        overlay?.move(goals.map(Self.flipped))
+        drawnFrames = goals
         for (mover, goal) in zip(movers, goals) { mover.move(to: goal) }
+        let thisDrag = drag
         WindowMover.whenIdle(movers) { [weak self] in
             // A moment for the apps to draw at their new size before the covers lift.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, !self.ended else { overlay?.finish(); return }
+                    guard let self, !self.ended, self.drag == thisDrag else { overlay?.finish(); return }
                     self.dragging = false
-                    // Puts the glow and the edge back, where the windows now are.
-                    self.settle()
+                    // The glow and the edge go where the windows were put, straight away, without
+                    // asking the apps; a look a moment later makes room for one that wouldn't go
+                    // as narrow as asked.
+                    self.knownFrames = goals
+                    self.updateDecorations(goals)
                     overlay?.finish()
+                    self.scheduleSettle()
                 }
             }
         }
@@ -721,49 +798,57 @@ private final class LockInSession {
     /// windows between desktops, so it's minimized until you get there, and comes back there).
     func moveNewcomers() {
         guard !ended, !dragging, showing else { return }
+        // Nothing on screen has changed since the last look: nothing new can have opened.
+        let numbers = OnScreenWindows.numbers().sorted()
+        guard numbers != lastLookedAt || numbers.isEmpty else { return }
         let mine = Set(panes.map(\.pid))
         let me = getpid()
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        let screenArea = screen.map { CGRect(x: $0.frame.minX, y: mainHeight - $0.frame.maxY, width: $0.frame.width, height: $0.frame.height) }
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         var found: [pid_t: Set<CGWindowID>] = [:]
         for info in list {
             guard (info[kCGWindowLayer as String] as? Int) == 0,
                   let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me, !mine.contains(pid),
+                  !keptApps.contains(pid), !Games.isGame(pid), !BarSettings.lockInAllows(pid),
                   let id = info[kCGWindowNumber as String] as? CGWindowID,
                   (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds), rect.width >= 80, rect.height >= 60,
+                  screenArea.map({ $0.intersects(rect) }) ?? true,
                   WindowSpaces.spaceIDs(of: id) == [space] else { continue }
             // You brought this one back after lock-in put it away: you want it here.
             if putAway.contains(id) { keptWindows.insert(id) }
             guard !keptWindows.contains(id), !keptApps.contains(pid) else { continue }
             found[pid, default: []].insert(id)
         }
-        guard !found.isEmpty else { return }
+        // Only a look that found nothing to do counts as done: a window found but not dealt with yet
+        // (its app still opening) is looked for again next time.
+        guard !found.isEmpty else { return lastLookedAt = numbers }
         let elsewhere = NSScreen.screens.first { screen in
             screen.displayID != display
                 && WindowSpaces.currentSpaceID(on: screen).map(LockIn.lockedSpaces.contains) != true
         }
-        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
-        var tuckedAny = false
+        var tuckedAny = false, hidAny = false
         for (pid, ids) in found {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.3)
             let windows = (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
-            // A game starting up is left alone (it may be a match you're joining); apps that can't
-            // be moved one window at a time are hidden instead.
-            if Games.isGame(pid) || BarSettings.lockInAllows(pid) { continue }
+            // Apps that can't be moved one window at a time are hidden instead. (Games starting up
+            // were left alone above: it may be a match you're joining.)
             if windows.isEmpty {
                 if hiddenApps.contains(pid) {
                     // Hidden once already, and you've brought it back: you want it here.
                     keptApps.insert(pid)
                 } else if BarSettings.lockInHideOthers {
                     hide([pid])
+                    hidAny = true
                 }
                 continue
             }
             for window in windows {
-                guard (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole,
-                      let id = AppWindowList.windowID(of: window), ids.contains(id) else { continue }
+                guard let id = AppWindowList.windowID(of: window), ids.contains(id),
+                      (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole else { continue }
                 if let elsewhere {
                     let room = elsewhere.visibleFrame.insetBy(dx: 40, dy: 40)
                     if let frame = LockIn.frame(of: window), frame.width > room.width || frame.height > room.height {
@@ -778,8 +863,8 @@ private final class LockInSession {
             }
         }
         // An app whose window was just tucked away is still the one in front: go back to the two.
-        if tuckedAny { WindowFocus.raise(panes[0].id, of: panes[0].pid) }
-        onPutAway()
+        if tuckedAny { raiseLastUsed() }
+        if tuckedAny || hidAny { onPutAway() }
     }
 
     // MARK: Watching them
@@ -811,9 +896,13 @@ private final class LockInSession {
         guard !ended else { return }
         if notification == kAXUIElementDestroyedNotification {
             // One of the two closed: lock-in is over here.
-            if panes.contains(where: { CFEqual($0.element, element) }) { onEnd() }
+            if panes.contains(where: { CFEqual($0.element, element) }) {
+                DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.onEnd() } }
+            }
             return
         }
+        // One of the two was minimized: nothing to draw round until it's back.
+        if notification == kAXWindowMiniaturizedNotification { return hideDecorations() }
         // The moves Clear Dock is making as you drag the edge between them need nothing more.
         if dragging { return }
         // You're moving or resizing one yourself: the glow and the edge step aside until you let go,
@@ -842,6 +931,7 @@ private final class LockInSession {
     /// showing: where the windows are given as `frames` (in the system's window coordinates), or
     /// else where they are now.
     func updateDecorations(_ frames: [CGRect]? = nil) {
+        if dragging, frames == nil { return }
         guard !ended, showing, !LockIn.missionControlOpen, panes.count == 2,
               let frames = frames ?? currentFrames() else { return hideDecorations() }
         drawnFrames = frames
