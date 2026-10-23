@@ -189,11 +189,18 @@ enum AppWindowList {
 enum Games {
     private static var known: [pid_t: Bool] = [:]
 
+    /// Game launchers that don't say they're games (League of Legends' says nothing, Riot Client's
+    /// says developer tools), by the start of their bundle identifier.
+    private static let launchers = ["com.riotgames.", "com.valvesoftware.steam", "com.blizzard.", "net.battle.",
+                                    "com.epicgames.", "com.mojang."]
+
     static func isGame(_ pid: pid_t) -> Bool {
         if let answer = known[pid] { return answer }
-        let category = NSRunningApplication(processIdentifier: pid)?.bundleURL
+        let app = NSRunningApplication(processIdentifier: pid)
+        let category = app?.bundleURL
             .flatMap { Bundle(url: $0)?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String }
-        let answer = category?.contains("games") ?? false
+        let bundle = app?.bundleIdentifier ?? ""
+        let answer = category?.contains("games") == true || launchers.contains { bundle.hasPrefix($0) }
         known[pid] = answer
         return answer
     }

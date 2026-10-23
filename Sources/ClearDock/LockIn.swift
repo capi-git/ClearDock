@@ -551,8 +551,16 @@ private final class LockInSession {
     func tuck(_ windows: [AXUIElement]) {
         for window in windows where AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
             tucked.append(window)
+            if let id = AppWindowList.windowID(of: window) { putAway.insert(id) }
         }
     }
+
+    /// Windows lock-in minimized (tucked away, or sent away when they opened), by number: one that
+    /// shows on the desktop again is one you brought back, and is left alone from then on.
+    private var putAway = Set<CGWindowID>()
+    /// Windows, and apps (lock-in hid them, as it can't see their windows), you brought back.
+    private var keptWindows = Set<CGWindowID>()
+    private var keptApps = Set<pid_t>()
 
     func refit() {
         guard !ended, !dragging else { return }
@@ -725,6 +733,9 @@ private final class LockInSession {
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds), rect.width >= 80, rect.height >= 60,
                   WindowSpaces.spaceIDs(of: id) == [space] else { continue }
+            // You brought this one back after lock-in put it away: you want it here.
+            if putAway.contains(id) { keptWindows.insert(id) }
+            guard !keptWindows.contains(id), !keptApps.contains(pid) else { continue }
             found[pid, default: []].insert(id)
         }
         guard !found.isEmpty else { return }
@@ -742,7 +753,12 @@ private final class LockInSession {
             // be moved one window at a time are hidden instead.
             if Games.isGame(pid) || BarSettings.lockInAllows(pid) { continue }
             if windows.isEmpty {
-                if BarSettings.lockInHideOthers { hide([pid]) }
+                if hiddenApps.contains(pid) {
+                    // Hidden once already, and you've brought it back: you want it here.
+                    keptApps.insert(pid)
+                } else if BarSettings.lockInHideOthers {
+                    hide([pid])
+                }
                 continue
             }
             for window in windows {
@@ -755,6 +771,7 @@ private final class LockInSession {
                     }
                     Self.setPosition(window, CGPoint(x: room.minX, y: mainHeight - room.maxY))
                 } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+                    putAway.insert(id)
                     onSendAway(window)
                     tuckedAny = true
                 }
