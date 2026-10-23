@@ -246,7 +246,9 @@ final class TopBarController {
     private var backdropsAtTop = false
     /// Screens where Mission Control or App Exposé is open; the bar is hidden there meanwhile.
     private var exposeScreens = Set<CGDirectDisplayID>()
-    private var exposeTimer: Timer?
+    private var exposeTimer: DispatchSourceTimer?
+    /// Looks for Mission Control off the main thread, so the check never holds up drawing.
+    private let exposeQueue = DispatchQueue(label: "ClearDock.MissionControlWatch", qos: .userInitiated)
     /// Screens showing a full-screen app; the bar steps aside there, as the menu bar does.
     private var fullScreenScreens = Set<CGDirectDisplayID>()
     /// Bars already put in `BarSpace`.
@@ -259,7 +261,6 @@ final class TopBarController {
     private let popover = BarPopover()
     private let lockIn = LockIn()
     /// The windows on screen at the last look for Mission Control.
-    private var onScreenNumbers: [UInt] = []
     /// Every window, on every desktop, at the last regular look.
     private var allWindowNumbers: [UInt] = []
     private let lockInPicker = LockInPicker()
@@ -476,10 +477,9 @@ final class TopBarController {
         endHold()
         lockIn.endAll()
         lockInPicker.close()
-        exposeTimer?.invalidate()
+        exposeTimer?.cancel()
         exposeTimer = nil
         exposeScreens.removeAll()
-        onScreenNumbers = []
         fullScreenScreens.removeAll()
         inBarSpace.removeAll()
         backdropTask?.cancel()
@@ -618,27 +618,41 @@ final class TopBarController {
     }
 
     /// Checks a few times a second whether Mission Control or App Exposé is open. macOS doesn't
-    /// announce either, but while one is open it draws a backdrop over each screen; looking for it
-    /// takes well under a millisecond.
+    /// announce either, but while one is open it draws a backdrop over each screen. The looking is
+    /// done on its own queue, and only when the windows on screen have changed (Mission Control
+    /// adds its own) does it look closer and tell the bars.
     private func startExposeWatch() {
-        exposeTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.checkExpose() }
+        exposeTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: exposeQueue)
+        timer.schedule(deadline: .now(), repeating: 0.25, leeway: .milliseconds(100))
+        var seen: [UInt] = []
+        timer.setEventHandler { [weak self] in
+            let numbers = OnScreenWindows.numbers()
+            guard numbers != seen || numbers.isEmpty else { return }
+            seen = numbers
+            let backdrops = Self.missionControlBackdrops()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.checkExpose(backdrops) }
+            }
         }
-        timer.tolerance = 0.1
-        RunLoop.main.add(timer, forMode: .common)
+        timer.resume()
         exposeTimer = timer
     }
 
-    private func checkExpose() {
-        // Only look closer when the windows on screen have changed: Mission Control adds its own.
-        let numbers = OnScreenWindows.numbers()
-        guard numbers != onScreenNumbers || numbers.isEmpty else { return }
-        onScreenNumbers = numbers
+    /// Where Mission Control's backdrops are, in the system's window coordinates.
+    nonisolated private static func missionControlBackdrops() -> [CGRect] {
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.compactMap { info in
+            guard info[kCGWindowOwnerName as String] as? String == "WindowManager", info[kCGWindowLayer as String] as? Int == 19,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+            return CGRect(dictionaryRepresentation: bounds)
+        }
+    }
+
+    private func checkExpose(_ backdrops: [CGRect]) {
+        guard running else { return }
         var open = Set<CGDirectDisplayID>()
-        for info in windows where info[kCGWindowOwnerName as String] as? String == "WindowManager" && info[kCGWindowLayer as String] as? Int == 19 {
-            guard let bounds = info[kCGWindowBounds as String] as? NSDictionary, let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
+        for rect in backdrops {
             for screen in NSScreen.screens where Self.topDown(screen.frame).insetBy(dx: 2, dy: 2).intersects(rect) && rect.width >= screen.frame.width - 2 {
                 if let id = screen.displayID { open.insert(id) }
             }

@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        StallWatch.start()
         Settings.seedFromSystemDock()
         if Settings.hideSystemDock { SystemDock.hide() }
         controller = DockController()
