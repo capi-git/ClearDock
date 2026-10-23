@@ -50,6 +50,10 @@ final class LockIn {
     /// Windows tucked away on desktops whose lock-in ended while you were elsewhere. They come back
     /// when you next go there, so they reappear on their own desktop.
     private var waiting: [UInt64: [AXUIElement]] = [:]
+    /// Windows that opened on a locked-in desktop, sent away: minimized until the screen they're on
+    /// shows a desktop that isn't locked in, where they come back (macOS brings a minimized window
+    /// back on the desktop you're on). macOS doesn't let apps move a window to another desktop.
+    private var sentAway: [(window: AXUIElement, display: CGDirectDisplayID)] = []
     private var tokens: [NSObjectProtocol] = []
     /// Looks every few seconds for windows of other apps opening on a locked-in desktop.
     private var newcomerTimer: Timer?
@@ -97,6 +101,8 @@ final class LockIn {
         for session in Array(sessions.values) { end(session, now: true) }
         for windows in waiting.values { Self.unminimize(windows) }
         waiting.removeAll()
+        Self.unminimize(sentAway.map(\.window))
+        sentAway.removeAll()
         updateWatching()
         saveLeftovers()
     }
@@ -150,6 +156,11 @@ final class LockIn {
             self.end(session)
         }
         session.onPutAway = { [weak self] in self?.saveLeftovers() }
+        session.onSendAway = { [weak self, weak session] window in
+            guard let self, let session else { return }
+            self.sentAway.append((window, session.display))
+            self.updateWatching()
+        }
         sessions[space] = session
         if BarSettings.lockInHideOthers {
             let kept = Set(picked.map(\.id))
@@ -196,6 +207,8 @@ final class LockIn {
         }
         updateWatching()
         publish()
+        // That desktop isn't locked in any more, so windows sent away from it can come back now.
+        bringBackSentAway()
         saveLeftovers()
     }
 
@@ -203,7 +216,7 @@ final class LockIn {
 
     /// Listens to the system only while a desktop is locked in or has windows waiting to come back.
     private func updateWatching() {
-        let needed = !sessions.isEmpty || !waiting.isEmpty
+        let needed = !sessions.isEmpty || !waiting.isEmpty || !sentAway.isEmpty
         if needed && tokens.isEmpty {
             let center = NSWorkspace.shared.notificationCenter
             let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
@@ -254,6 +267,28 @@ final class LockIn {
             session.showing = current.contains(session.space)
             session.showDecorationsAgain()
         }
+        bringBackSentAway()
+    }
+
+    /// Brings back windows sent away from a locked-in desktop, on screens now showing a desktop that
+    /// isn't locked in, so they open there.
+    private func bringBackSentAway() {
+        guard !sentAway.isEmpty else { return }
+        var still: [(window: AXUIElement, display: CGDirectDisplayID)] = []
+        for entry in sentAway {
+            if let screen = NSScreen.screens.first(where: { $0.displayID == entry.display }) {
+                guard let current = WindowSpaces.currentSpaceID(on: screen), !Self.lockedSpaces.contains(current) else {
+                    still.append(entry)
+                    continue
+                }
+            }
+            // On a desktop that isn't locked in (or its screen has gone, and macOS put it elsewhere).
+            Self.unminimize([entry.window])
+        }
+        guard still.count != sentAway.count else { return }
+        sentAway = still
+        updateWatching()
+        saveLeftovers()
     }
 
     private func screensChanged() {
@@ -292,7 +327,7 @@ final class LockIn {
 
     private func saveLeftovers() {
         var windows: [[String: Int]] = []
-        for window in sessions.values.flatMap(\.tucked) + waiting.values.flatMap({ $0 }) {
+        for window in sessions.values.flatMap(\.tucked) + waiting.values.flatMap({ $0 }) + sentAway.map(\.window) {
             var pid: pid_t = 0
             guard AXUIElementGetPid(window, &pid) == .success, let id = AppWindowList.windowID(of: window) else { continue }
             windows.append(["pid": Int(pid), "window": Int(id)])
@@ -438,6 +473,8 @@ private final class LockInSession {
     var onEnd: () -> Void = {}
     /// It tucked away or hid something more (a window that opened meanwhile).
     var onPutAway: () -> Void = {}
+    /// A window that opened on the desktop was sent away, to come back on a desktop that isn't locked in.
+    var onSendAway: (AXUIElement) -> Void = { _ in }
 
     /// Left, then right, each with what moves it.
     private var panes: [Pane]
@@ -668,9 +705,10 @@ private final class LockInSession {
 
     // MARK: Windows opening on the desktop
 
-    /// Windows of other apps that open on the desktop while it's locked in go elsewhere: onto the
-    /// desktop showing on another screen when there is one (macOS lets apps move windows between
-    /// screens, though not between desktops), or else they're tucked away with the rest.
+    /// Windows of other apps that open on the desktop while it's locked in go to a desktop that isn't
+    /// locked in: the one showing on another screen, when there is one (macOS lets apps move windows
+    /// between screens), or else the next one you go to on this screen (macOS doesn't let apps move
+    /// windows between desktops, so it's minimized until you get there, and comes back there).
     func moveNewcomers() {
         guard !ended, !dragging, showing else { return }
         let mine = Set(panes.map(\.pid))
@@ -688,7 +726,10 @@ private final class LockInSession {
             found[pid, default: []].insert(id)
         }
         guard !found.isEmpty else { return }
-        let elsewhere = NSScreen.screens.first { $0.displayID != display }
+        let elsewhere = NSScreen.screens.first { screen in
+            screen.displayID != display
+                && WindowSpaces.currentSpaceID(on: screen).map(LockIn.lockedSpaces.contains) != true
+        }
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
         var tuckedAny = false
         for (pid, ids) in found {
@@ -712,7 +753,7 @@ private final class LockInSession {
                     }
                     Self.setPosition(window, CGPoint(x: room.minX, y: mainHeight - room.maxY))
                 } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
-                    tucked.append(window)
+                    onSendAway(window)
                     tuckedAny = true
                 }
             }

@@ -873,7 +873,7 @@ private struct DesktopsTab: View {
             } header: {
                 Text("Lock-in mode")
             } footer: {
-                Note("Lock In puts two apps side by side on the desktop you're on. Everything else there is tucked away until you unlock, and anything new that opens goes elsewhere.")
+                Note("Lock In puts two apps side by side on the desktop you're on. Everything else there is tucked away until you unlock, and anything new that opens there moves to a desktop that isn't locked in.")
             }
         }
         .formStyle(.grouped)
