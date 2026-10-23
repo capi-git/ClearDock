@@ -195,6 +195,26 @@ final class SettingsStore: ObservableObject {
     @Published var lockInBorder = true { didSet { barEdit { BarSettings.lockInBorder = lockInBorder } } }
     @Published var lockInGap = 12.0 { didSet { barEdit { BarSettings.lockInGap = lockInGap } } }
     @Published var lockInFrostedCovers = false { didSet { barEdit { BarSettings.lockInFrostedCovers = lockInFrostedCovers } } }
+    /// Apps lock-in mode leaves alone, by bundle identifier.
+    @Published var lockInAllowedApps: [String] = [] { didSet { barEdit { BarSettings.lockInAllowedApps = lockInAllowedApps } } }
+
+    /// The apps open now that could be added to those lock-in leaves alone.
+    var appsToAllow: [(bundle: String, name: String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0 != NSRunningApplication.current }
+            .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }
+            .filter { !lockInAllowedApps.contains($0.bundle) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    static func appName(_ bundle: String) -> String {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
+            .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? bundle
+    }
+
+    static func appIcon(_ bundle: String) -> NSImage? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle).map { NSWorkspace.shared.icon(forFile: $0.path) }
+    }
 
     /// Your desktops, for naming and colouring them. Read when the Desktops tab is shown.
     struct DesktopRow: Identifiable {
@@ -351,6 +371,7 @@ final class SettingsStore: ObservableObject {
         lockInBorder = BarSettings.lockInBorder
         lockInGap = BarSettings.lockInGap
         lockInFrostedCovers = BarSettings.lockInFrostedCovers
+        lockInAllowedApps = BarSettings.lockInAllowedApps
         if !desktopRows.isEmpty { loadDesktops() }
         loading = false
     }
@@ -865,6 +886,25 @@ private struct DesktopsTab: View {
                 Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
                 Toggle("Tuck away the other windows", isOn: $store.lockInHideOthers)
                 Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
+                LabeledContent("Apps left alone") {
+                    Menu("Add") {
+                        ForEach(store.appsToAllow, id: \.bundle) { app in
+                            Button(app.name) { store.lockInAllowedApps.append(app.bundle) }
+                        }
+                    }
+                    .fixedSize()
+                }
+                ForEach(store.lockInAllowedApps, id: \.self) { bundle in
+                    HStack(spacing: 8) {
+                        if let icon = SettingsStore.appIcon(bundle) {
+                            Image(nsImage: icon).resizable().frame(width: 20, height: 20)
+                        }
+                        Text(SettingsStore.appName(bundle))
+                        Spacer()
+                        Button("Remove") { store.lockInAllowedApps.removeAll { $0 == bundle } }
+                            .controlSize(.small)
+                    }
+                }
                 Picker("While dragging the edge", selection: $store.lockInFrostedCovers) {
                     Text("Plain").tag(false)
                     Text("Frosted").tag(true)
@@ -873,7 +913,7 @@ private struct DesktopsTab: View {
             } header: {
                 Text("Lock-in mode")
             } footer: {
-                Note("Lock In puts two apps side by side on the desktop you're on. Everything else there is tucked away until you unlock, and anything new that opens there moves to a desktop that isn't locked in.")
+                Note("Lock In puts two apps side by side on the desktop you're on. Everything else there is tucked away until you unlock, and anything new that opens there moves to a desktop that isn't locked in. Apps left alone (like Spotify) open and stay there as usual.")
             }
         }
         .formStyle(.grouped)

@@ -383,6 +383,8 @@ final class LockIn {
         var choices: [Choice] = []
         var apart = Set<pid_t>()
         for window in desktop.windows {
+            // Apps you've let be (like Spotify) are left as they are.
+            if BarSettings.lockInAllows(window.app) { continue }
             if Games.isGame(window.app) {
                 apart.insert(window.app)
                 continue
@@ -738,7 +740,7 @@ private final class LockInSession {
             let windows = (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
             // A game starting up is left alone (it may be a match you're joining); apps that can't
             // be moved one window at a time are hidden instead.
-            if Games.isGame(pid) { continue }
+            if Games.isGame(pid) || BarSettings.lockInAllows(pid) { continue }
             if windows.isEmpty {
                 if BarSettings.lockInHideOthers { hide([pid]) }
                 continue

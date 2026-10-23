@@ -283,6 +283,19 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "lockIn.frostedCovers") }
     }
 
+    /// Apps lock-in mode leaves alone, by bundle identifier: they open on a locked-in desktop as
+    /// usual, aren't tucked away, and don't count as one of the apps there. Music players to start with.
+    static var lockInAllowedApps: [String] {
+        get { defaults.stringArray(forKey: "lockIn.allowedApps") ?? ["com.spotify.client", "com.apple.Music"] }
+        set { defaults.set(newValue, forKey: "lockIn.allowedApps") }
+    }
+
+    /// Whether lock-in mode leaves an app alone.
+    @MainActor static func lockInAllows(_ pid: pid_t) -> Bool {
+        guard let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return false }
+        return lockInAllowedApps.contains(bundle)
+    }
+
     /// A glowing edge around both apps.
     static var lockInBorder: Bool {
         get { defaults.object(forKey: "lockIn.border") as? Bool ?? true }
