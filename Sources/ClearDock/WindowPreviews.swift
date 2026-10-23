@@ -125,6 +125,10 @@ enum WindowFocus {
 
         // If macOS didn't let the app come forward, open it the way a Dock click does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            // Whether it was the window you clicked that came forward, for checking with `log show`.
+            let front = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
+                .first { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }?[kCGWindowNumber as String] as? CGWindowID
+            previewLog.notice("Preview click: the clicked window is in front: \(front == windowID)")
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier != pid, let url = app.bundleURL else { return }
             previewLog.notice("Preview click: app wasn't in front yet, opening it instead")
             let config = NSWorkspace.OpenConfiguration()
