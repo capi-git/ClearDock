@@ -1,4 +1,8 @@
 import AppKit
+import os
+
+/// Why the dock showed or hid, readable with: log show --predicate 'subsystem == "local.cleardock" && category == "dock"'
+let dockLog = Logger(subsystem: "local.cleardock", category: "dock")
 
 /// A borderless, see-through panel that floats at Dock level on every Space
 /// and never takes focus from the app you are using.
@@ -157,6 +161,21 @@ final class DockController {
             MainActor.assumeIsolated { self?.checkLockIn() }
         }
 
+        // After sleep, and when an app quits (a full-screen one, say), look again at whether the dock
+        // should be tucked away, and that it's on screen if it shouldn't: macOS can take windows off
+        // the screen around sleep without saying so.
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.didTerminateApplicationNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.checkFullScreen()
+                    self.checkLockIn()
+                    self.keepOnScreen(because: name == NSWorkspace.didTerminateApplicationNotification ? "an app quit" : "waking up")
+                }
+            }
+        }
+
         // When matching the top bar, its look changing (its settings, the wallpaper, the desktop's
         // colour) changes the dock's too.
         NotificationCenter.default.addObserver(forName: BarLookShare.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -186,9 +205,19 @@ final class DockController {
     private func checkLockIn() {
         let now = !LockIn.lockedSpaces.isEmpty
             && currentScreen.flatMap(WindowSpaces.currentSpaceID(on:)).map(LockIn.lockedSpaces.contains) == true
-        guard now != lockedIn else { return }
+        guard now != lockedIn else { return keepOnScreen(because: "desktop changed") }
         lockedIn = now
+        dockLog.notice("Dock: lock-in desktop showing: \(now)")
         applyMode()
+    }
+
+    /// While the dock should stay on screen, makes sure it is, putting it back if macOS took it off.
+    private func keepOnScreen(because reason: String) {
+        guard !autoHides, !shown || !panel.isVisible else { return }
+        dockLog.notice("Dock: wasn't on screen though it should be (\(reason, privacy: .public)); showing it again")
+        removeTriggers()
+        show(on: currentScreen ?? NSScreen.screens.first, animated: false, because: reason)
+        updateReservedSpace()
     }
 
     private func refreshWallpaperColors(unlessRecent: Bool = false) {
@@ -204,8 +233,9 @@ final class DockController {
     private func checkFullScreen() {
         let displays = DesktopReader.fullScreenDisplays()
         let now = displays.contains("Main") || (currentScreen?.displayUUID).map(displays.contains) == true
-        guard now != fullScreenFront else { return }
+        guard now != fullScreenFront else { return keepOnScreen(because: "checking for full screen") }
         fullScreenFront = now
+        dockLog.notice("Dock: full-screen app showing: \(now)")
         applyMode()
     }
 
@@ -251,16 +281,20 @@ final class DockController {
     private func applyMode() {
         trashTimer?.invalidate()
         trashTimer = nil
+        dockLog.notice("Dock: \(self.autoHides ? "hides itself" : "stays on screen", privacy: .public) (hiding: \(Settings.autoHide), full screen: \(self.fullScreenFront), lock-in: \(self.lockedIn), settings open: \(self.keepVisible))")
         if autoHides {
             // If hiding was just turned on from the dock itself, slide away once the pointer leaves.
-            if shown { scheduleHide() } else { hide(animated: false) }
+            if shown { scheduleHide() } else { hide(animated: false, because: "hiding is on") }
         } else {
             removeTriggers()
-            show(on: NSScreen.screens.first, animated: false)
-            // A visible dock checks whether the Trash has filled every 15 seconds; the system
-            // may batch this with other work.
+            show(on: NSScreen.screens.first, animated: false, because: "staying on screen")
+            // A visible dock checks whether the Trash has filled every 15 seconds (and that it's still
+            // on screen); the system may batch this with other work.
             let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.model.refreshTrash() }
+                MainActor.assumeIsolated {
+                    self?.model.refreshTrash()
+                    self?.keepOnScreen(because: "regular check")
+                }
             }
             timer.tolerance = 5
             RunLoop.main.add(timer, forMode: .default)
@@ -345,8 +379,9 @@ final class DockController {
 
     // MARK: Showing and hiding
 
-    private func show(on screen: NSScreen?, animated: Bool) {
+    private func show(on screen: NSScreen?, animated: Bool, because reason: String = "pointer at the edge") {
         guard let screen else { return }
+        if !shown { dockLog.notice("Dock: showing (\(reason, privacy: .public))") }
         cancelHide()
         if !shown || self.screen != screen {
             let movedScreen = self.screen != screen
@@ -378,7 +413,8 @@ final class DockController {
         }
     }
 
-    private func hide(animated: Bool) {
+    private func hide(animated: Bool, because reason: String = "pointer left") {
+        if shown { dockLog.notice("Dock: hiding (\(reason, privacy: .public))") }
         shown = false
         cancelHide()
         stopBadgeUpdates()
