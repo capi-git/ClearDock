@@ -113,8 +113,10 @@ enum WindowFocus {
             activated = app.activate()
         } else if AXIsProcessTrusted(), bringForward(windowID, of: pid) {
             // Most apps only list the windows on the desktop you're on, so one on another desktop
-            // can't be found that way: the window server brings it forward, going to its desktop.
-            activated = true
+            // can't be found that way: the window server is asked to bring it forward, going to its
+            // desktop. macOS doesn't always allow that, so the app is brought forward as well, which
+            // is harmless if the window already came.
+            activated = app.activate()
         } else {
             if !AXIsProcessTrusted() { showAccessibilitySettingsOnce() }
             activated = app.activate()
