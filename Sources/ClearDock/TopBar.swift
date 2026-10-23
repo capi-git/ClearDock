@@ -82,59 +82,63 @@ struct ArtColours: Equatable {
     let accent: NSColor
 }
 
-/// Everything the bar views draw from. Shared by the bars on every screen.
+/// Everything the bar views draw from. Shared by the bars on every screen. Each piece of a bar
+/// redraws only when something it shows changes, not whenever anything here does.
 @MainActor
-final class TopBarModel: ObservableObject {
-    @Published var items: [BarItem] = []
-    @Published var look = BarLook()
-    @Published var layouts: [String: BarLayout] = [:]
-    @Published var desktops: [String: [Desktop]] = [:]
-    @Published var desktopNames: [String: String] = [:]
-    @Published var appName = ""
-    @Published var appIcon: NSImage?
-    @Published var track: NowPlaying.Track?
-    @Published var volume: Float?
-    @Published var muted = false
-    @Published var battery: Int?
-    @Published var charging = false
-    @Published var pluggedIn = false
-    @Published var now = Date()
-    @Published var desktopColours: [String: DesktopColour] = [:]
-    @Published var artwork: NSImage?
-    @Published var artColours: ArtColours?
+@Observable
+final class TopBarModel {
+    var items: [BarItem] = []
+    var look = BarLook()
+    var layouts: [String: BarLayout] = [:]
+    var desktops: [String: [Desktop]] = [:]
+    var desktopNames: [String: String] = [:]
+    var appName = ""
+    var appIcon: NSImage?
+    var track: NowPlaying.Track?
+    var volume: Float?
+    var muted = false
+    var battery: Int?
+    var charging = false
+    var pluggedIn = false
+    var now = Date()
+    var desktopColours: [String: DesktopColour] = [:]
+    var artwork: NSImage?
+    var artColours: ArtColours?
     /// Screens whose bar is a thin line while a game is in front.
-    @Published var thinScreens = Set<String>()
+    var thinScreens = Set<String>()
     /// Locked-in desktops, by the window server's id for them, and when each was locked in.
-    @Published var lockIns: [UInt64: Date] = [:]
+    var lockIns: [UInt64: Date] = [:]
     /// The desktop whose two windows are being chosen for lock-in mode.
-    @Published var lockInChoosing: UInt64?
+    var lockInChoosing: UInt64?
     /// Lock-in mode is getting a desktop's windows ready.
-    @Published var lockInStarting = false
+    var lockInStarting = false
     /// Screens whose bar the pointer is on, so a piece's hover highlight goes once it leaves even if
     /// that piece missed hearing so.
-    @Published var pointerInBar = Set<String>()
+    var pointerInBar = Set<String>()
     /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
     /// macOS menu bar sliding down underneath doesn't show through.
-    @Published var backdropScreens = Set<String>()
+    var backdropScreens = Set<String>()
     /// What's behind each screen's bar (its strip of wallpaper), used as that fill so the bar
     /// looks just as it always does.
-    @Published var backdrops: [String: CGImage] = [:]
+    var backdrops: [String: CGImage] = [:]
 
     /// Things the views ask the controller to do.
-    var toggleMute: () -> Void = {}
-    var changeVolume: (Float) -> Void = { _ in }
-    var rename: (Desktop) -> Void = { _ in }
-    var forget: (Desktop) -> Void = { _ in }
-    var setColour: (Desktop, DesktopColour?) -> Void = { _, _ in }
-    var hide: (BarItemKind) -> Void = { _ in }
-    var playPause: () -> Void = {}
-    var nextSong: () -> Void = {}
-    var previousSong: () -> Void = {}
-    var seek: (Double) -> Void = { _ in }
+    @ObservationIgnored var toggleMute: () -> Void = {}
+    @ObservationIgnored var changeVolume: (Float) -> Void = { _ in }
+    @ObservationIgnored var rename: (Desktop) -> Void = { _ in }
+    @ObservationIgnored var forget: (Desktop) -> Void = { _ in }
+    @ObservationIgnored var setColour: (Desktop, DesktopColour?) -> Void = { _, _ in }
+    @ObservationIgnored var hide: (BarItemKind) -> Void = { _ in }
+    @ObservationIgnored var playPause: () -> Void = {}
+    @ObservationIgnored var nextSong: () -> Void = {}
+    @ObservationIgnored var previousSong: () -> Void = {}
+    @ObservationIgnored var seek: (Double) -> Void = { _ in }
     /// The pointer moved onto (or, with nil, off) a desktop or the song, for their pop-ups.
-    var hoverDesktop: (Desktop?) -> Void = { _ in }
-    var hoverSong: (Bool) -> Void = { _ in }
-    var toggleLockIn: () -> Void = {}
+    @ObservationIgnored var hoverDesktop: (Desktop?) -> Void = { _ in }
+    @ObservationIgnored var leaveDesktop: (Desktop) -> Void = { _ in }
+    @ObservationIgnored var goToDesktop: (Desktop) -> Void = { _ in }
+    @ObservationIgnored var hoverSong: (Bool) -> Void = { _ in }
+    @ObservationIgnored var toggleLockIn: () -> Void = {}
 
     /// The song's look: tinted with the album cover's colours, when that's on.
     func songLook(_ base: BarLook) -> BarLook {
@@ -149,7 +153,7 @@ final class TopBarModel: ObservableObject {
         return look.tinted(colour.color)
     }
 
-    private var icons: [pid_t: NSImage] = [:]
+    @ObservationIgnored private var icons: [pid_t: NSImage] = [:]
 
     func icon(for pid: pid_t) -> NSImage? {
         if let icon = icons[pid] { return icon }
@@ -231,7 +235,7 @@ final class TopBarController {
     private var running = false
     private var tokens: [(NotificationCenter, NSObjectProtocol)] = []
     private var clockTimer: Timer?
-    private var desktopTimer: Timer?
+    private var desktopTimer: DispatchSourceTimer?
     private var revealTimer: Timer?
     /// The screen whose bar has stepped aside for the macOS menu bar, while the pointer is up there.
     private var revealScreen: CGDirectDisplayID?
@@ -251,8 +255,12 @@ final class TopBarController {
     private let exposeQueue = DispatchQueue(label: "ClearDock.MissionControlWatch", qos: .userInitiated)
     /// Screens showing a full-screen app; the bar steps aside there, as the menu bar does.
     private var fullScreenScreens = Set<CGDirectDisplayID>()
-    /// Bars already put in `BarSpace`.
+    /// Bars already put in `BarSpace`. A bar that's put away leaves it, and goes back in when shown.
     private var inBarSpace = Set<CGDirectDisplayID>()
+    private let desktopQueue = DispatchQueue(label: "ClearDock.Desktops", qos: .userInitiated)
+    private var readingDesktops = false
+    private var desktopsAgain = false
+    private var pendingCoverChecks: [DispatchWorkItem] = []
     private var pendingLayout: DispatchWorkItem?
     /// Screens where a game or another full-screen window is in front; the bar steps aside there.
     private var coveredScreens = Set<CGDirectDisplayID>()
@@ -260,16 +268,13 @@ final class TopBarController {
     private var leaving = Set<CGDirectDisplayID>()
     private let popover = BarPopover()
     private let lockIn = LockIn()
-    /// The windows on screen at the last look for Mission Control.
-    /// Every window, on every desktop, at the last regular look.
-    private var allWindowNumbers: [UInt] = []
     private let lockInPicker = LockInPicker()
 
     init() {
         nowPlaying.onChange = { [weak self] in
             guard let self else { return }
             let songChanged = !(self.nowPlaying.track?.isSameSong(as: self.model.track) ?? (self.model.track == nil))
-            self.model.track = self.nowPlaying.track
+            if self.model.track != self.nowPlaying.track { self.model.track = self.nowPlaying.track }
             if self.model.artwork !== self.nowPlaying.artwork {
                 self.model.artwork = self.nowPlaying.artwork
                 self.model.artColours = self.nowPlaying.artwork.flatMap(Self.colours(of:))
@@ -285,9 +290,9 @@ final class TopBarController {
         }
         battery.onChange = { [weak self] in
             guard let self else { return }
-            self.model.battery = self.battery.percent
-            self.model.charging = self.battery.charging
-            self.model.pluggedIn = self.battery.pluggedIn
+            if self.model.battery != self.battery.percent { self.model.battery = self.battery.percent }
+            if self.model.charging != self.battery.charging { self.model.charging = self.battery.charging }
+            if self.model.pluggedIn != self.battery.pluggedIn { self.model.pluggedIn = self.battery.pluggedIn }
         }
         model.toggleMute = { [weak self] in self?.volume.toggleMute() }
         model.changeVolume = { [weak self] change in
@@ -312,6 +317,11 @@ final class TopBarController {
         model.previousSong = { [weak self] in self?.nowPlaying.previous() }
         model.seek = { [weak self] seconds in self?.nowPlaying.seek(to: seconds) }
         model.hoverDesktop = { [weak self] desktop in self?.hoverDesktop(desktop) }
+        model.leaveDesktop = { [weak self] desktop in self?.hoverDesktop(nil, leaving: desktop) }
+        model.goToDesktop = { [weak self] desktop in
+            self?.popover.hide()
+            DesktopSwitcher.go(to: desktop)
+        }
         lockIn.onChange = { [weak self] in
             guard let self else { return }
             let lockIns = self.lockIn.lockedIn
@@ -354,9 +364,10 @@ final class TopBarController {
         applyMenuBarSetting()
         guard BarSettings.enabled else { return stop() }
         start()
-        model.items = BarSettings.items
-        model.desktopNames = BarSettings.desktopNames
-        model.desktopColours = BarSettings.desktopColours
+        let items = BarSettings.items, names = BarSettings.desktopNames, colours = BarSettings.desktopColours
+        if model.items != items { model.items = items }
+        if model.desktopNames != names { model.desktopNames = names }
+        if model.desktopColours != colours { model.desktopColours = colours }
         // Without its piece in the bar there'd be no way to unlock.
         if !BarSettings.items.contains(where: { $0.kind == .lockIn && $0.isOn }) { lockIn.endAll() }
         lockIn.settingsChanged()
@@ -376,8 +387,7 @@ final class TopBarController {
             }
         } else {
             guard SystemMenuBar.isHiddenByClearDock else { return }
-            SystemMenuBar.restore()
-            menuBarChanged()
+            SystemMenuBar.restore { [weak self] _ in self?.menuBarChanged() }
         }
     }
 
@@ -400,10 +410,11 @@ final class TopBarController {
         nowPlaying.start()
         volume.start()
         battery.start()
-        model.track = nowPlaying.track
+        if model.track != nowPlaying.track { model.track = nowPlaying.track }
 
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {
+            if $0.popover.showing?.hasPrefix("desktop-") == true { $0.popover.hide() }
             $0.refreshDesktops()
             $0.refreshWallpaperColors()
             $0.checkFullScreen()
@@ -424,7 +435,7 @@ final class TopBarController {
             observe(workspace, name) { $0.refreshDesktops(); $0.model.pruneIcons() }
         }
         observe(workspace, NSWorkspace.didWakeNotification) { $0.tick(); $0.refreshDesktops(); $0.layout() }
-        observe(.default, NSApplication.didChangeScreenParametersNotification) { $0.layout() }
+        observe(.default, NSApplication.didChangeScreenParametersNotification) { $0.scheduleLayout(after: 0.1) }
         observe(.default, WallpaperPalette.didChange) { $0.applyLook(); $0.refreshBackdrops(after: 0.2) }
         observe(.default, .NSSystemTimeZoneDidChange) { $0.tick() }
         // A right-click menu opening closes any pop-up, so the two don't overlap.
@@ -434,20 +445,24 @@ final class TopBarController {
             $0.scheduleLayout(after: 0.5)
         }
 
-        let desktops = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                // A safety net for changes nothing announces (a window opening, closing or moving to
-                // another desktop): only worth a full look when the windows have changed.
-                let numbers = OnScreenWindows.numbers(everywhere: true)
-                guard numbers != self.allWindowNumbers else { return }
-                self.allWindowNumbers = numbers
-                self.refreshDesktops()
-                self.checkCovered()
+        // A safety net for changes nothing announces (a window opening, closing or moving to another
+        // desktop): only worth a full look when the set of windows has changed, not just their order.
+        let desktops = DispatchSource.makeTimerSource(queue: desktopQueue)
+        desktops.schedule(deadline: .now() + 4, repeating: 4, leeway: .seconds(2))
+        var seen: [UInt] = []
+        desktops.setEventHandler { [weak self] in
+            let numbers = OnScreenWindows.numbers(everywhere: true).sorted()
+            guard numbers != seen else { return }
+            seen = numbers
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.running else { return }
+                    self.refreshDesktops()
+                    self.checkCovered()
+                }
             }
         }
-        desktops.tolerance = 2
-        RunLoop.main.add(desktops, forMode: .common)
+        desktops.resume()
         desktopTimer = desktops
 
         tick()
@@ -469,8 +484,10 @@ final class TopBarController {
         battery.stop()
         clockTimer?.invalidate()
         clockTimer = nil
-        desktopTimer?.invalidate()
+        desktopTimer?.cancel()
         desktopTimer = nil
+        pendingCoverChecks.forEach { $0.cancel() }
+        pendingCoverChecks.removeAll()
         revealTimer?.invalidate()
         revealTimer = nil
         revealScreen = nil
@@ -483,6 +500,7 @@ final class TopBarController {
         fullScreenScreens.removeAll()
         inBarSpace.removeAll()
         backdropTask?.cancel()
+        backdropTask = nil
         model.backdrops = [:]
         pendingLayout?.cancel()
         popover.hide()
@@ -550,6 +568,7 @@ final class TopBarController {
                     if !panel.isVisible {
                         panel.setFrame(line.offsetBy(dx: 0, dy: 3), display: false)
                         panel.orderFrontRegardless()
+                        inBarSpace.remove(id)
                     }
                     if panel.frame != line { Self.animate(panel, to: line, alpha: 1) }
                 } else if panel.isVisible, !leaving.contains(id) {
@@ -559,6 +578,7 @@ final class TopBarController {
                         guard let self, self.leaving.contains(id) else { return }
                         self.leaving.remove(id)
                         panel.orderOut(nil)
+                        self.inBarSpace.remove(id)
                     }
                 }
                 continue
@@ -574,12 +594,16 @@ final class TopBarController {
                 if !panel.isVisible || isNew {
                     panel.setFrame(frame.offsetBy(dx: 0, dy: frame.height), display: false)
                     panel.alphaValue = 0
+                    panel.orderFrontRegardless()
+                    inBarSpace.remove(id)
                 }
-                panel.orderFrontRegardless()
                 Self.animate(panel, to: frame, alpha: away ? 0 : 1)
             } else {
                 if panel.frame != frame { panel.setFrame(frame, display: true) }
-                panel.orderFrontRegardless()
+                if !panel.isVisible {
+                    panel.orderFrontRegardless()
+                    inBarSpace.remove(id)
+                }
             }
 
             // Leave the middle clear for the notch, and for any island drawn over the bar.
@@ -673,6 +697,7 @@ final class TopBarController {
         if open {
             panel.alphaValue = 0
             panel.ignoresMouseEvents = true
+            clearPointer(on: [id])
         } else if !coveredScreens.contains(id), !fullScreenScreens.contains(id), revealScreen != id {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.2
@@ -709,13 +734,15 @@ final class TopBarController {
     private func makePanel(for id: CGDirectDisplayID) -> (panel: BarPanel, view: BarHostingView) {
         let panel = BarPanel()
         let view = BarHostingView(rootView: TopBarView(model: model, screenKey: String(id)))
+        // The bar's frame is set here; its view needn't work out sizes for the window on each change.
+        view.sizingOptions = []
         view.onTopEdge = { [weak self] in self?.pointerAtTop(of: id) }
         view.onPointer = { [weak self] inside in
             guard let self else { return }
             if inside {
-                self.model.pointerInBar.insert(String(id))
+                if !self.model.pointerInBar.contains(String(id)) { self.model.pointerInBar.insert(String(id)) }
             } else {
-                self.model.pointerInBar.remove(String(id))
+                if self.model.pointerInBar.contains(String(id)) { self.model.pointerInBar.remove(String(id)) }
                 // Off the bar and not onto its pop-up: the pop-up can go.
                 self.popover.release()
             }
@@ -764,12 +791,14 @@ final class TopBarController {
     /// underneath the bar. The bar fills in so the menu bar doesn't show through, and only steps
     /// aside once the pointer has been held at the top for a moment.
     private func pointerAtTop(of id: CGDirectDisplayID) {
+        // Already watching the pointer up here: it carries on following it.
+        guard holdScreen != id || holdTimer == nil else { return }
         guard BarSettings.takesMenuBarsPlace, revealTimer == nil, !coveredScreens.contains(id) else { return }
-        if Date().timeIntervalSince(backdropsTaken) > 120 { refreshBackdrops(after: 0) }
+        if Date().timeIntervalSince(backdropsTaken) > 120, backdropTask == nil { refreshBackdrops(after: 0) }
         if holdScreen != id { heldSince = Date() }
         holdScreen = id
         leftTopSince = nil
-        model.backdropScreens = [String(id)]
+        if model.backdropScreens != [String(id)] { model.backdropScreens = [String(id)] }
         guard holdTimer == nil else { return }
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkHold() }
@@ -808,7 +837,7 @@ final class TopBarController {
         holdScreen = nil
         heldSince = nil
         leftTopSince = nil
-        if !keepBackdrop { model.backdropScreens = [] }
+        if !keepBackdrop, !model.backdropScreens.isEmpty { model.backdropScreens = [] }
     }
 
     /// Takes a picture of the wallpaper behind each bar (leaving out every window, the macOS menu
@@ -825,11 +854,13 @@ final class TopBarController {
             return (String(id), id, local, screen.backingScaleFactor)
         }
         backdropTask = Task { @MainActor [weak self] in
+            defer { if !Task.isCancelled { self?.backdropTask = nil } }
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled,
                   let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
             var images: [String: CGImage] = [:]
             for bar in bars {
+                guard !Task.isCancelled else { return }
                 guard let display = content.displays.first(where: { $0.displayID == bar.id }) else { continue }
                 let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
                 let config = SCStreamConfiguration()
@@ -868,33 +899,28 @@ final class TopBarController {
            mouse.y > screen.frame.maxY - 60 { return }
         // Stay out of the way for as long as the macOS menu bar is down or one of its menus is open,
         // however long you take. (Five minutes at most, in case macOS ever stops showing either.)
-        if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarShowing() || Self.menuOpen() { return }
+        if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarOrMenuShowing() { return }
         revealTimer?.invalidate()
         revealTimer = nil
         revealScreen = nil
-        model.backdropScreens = []
+        if !model.backdropScreens.isEmpty { model.backdropScreens = [] }
         setBarsVisible(true)
     }
 
-    /// Whether a macOS menu bar is down on any screen right now.
-    private static func menuBarShowing() -> Bool {
+    /// Whether a macOS menu bar is down on any screen, or a menu (from the menu bar or a
+    /// right-click) is open in any app, from one look at the windows on screen.
+    private static func menuBarOrMenuShowing() -> Bool {
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        let level = Int(CGWindowLevelForKey(.mainMenuWindow))
+        let menuBar = Int(CGWindowLevelForKey(.mainMenuWindow))
+        let menu = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        let screens = NSScreen.screens.map { topDown($0.frame) }
         return windows.contains { info in
-            guard info[kCGWindowLayer as String] as? Int == level,
-                  info[kCGWindowOwnerName as String] as? String == "Window Server",
+            let layer = info[kCGWindowLayer as String] as? Int
+            if layer == menu { return (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.5 }
+            guard layer == menuBar, info[kCGWindowOwnerName as String] as? String == "Window Server",
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
-            return NSScreen.screens.contains { abs(topDown($0.frame).minY - rect.minY) < 1 && rect.width >= $0.frame.width - 1 }
-        }
-    }
-
-    /// Whether a menu (from the menu bar or a right-click) is open, in any app.
-    private static func menuOpen() -> Bool {
-        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        let level = Int(CGWindowLevelForKey(.popUpMenuWindow))
-        return windows.contains { info in
-            info[kCGWindowLayer as String] as? Int == level && (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.5
+            return screens.contains { abs($0.minY - rect.minY) < 1 && rect.width >= $0.width - 1 }
         }
     }
 
@@ -904,21 +930,51 @@ final class TopBarController {
         let bars = panels.filter { key, _ in
             !coveredScreens.contains(key) && (id == nil || key == id)
                 && !(visible && (exposeScreens.contains(key) || fullScreenScreens.contains(key)))
-        }.map(\.value.panel)
-        if !visible { popover.hide() }
+        }
+        let panelsShown = bars.map(\.value.panel)
+        if !visible {
+            popover.hide()
+            clearPointer(on: bars.map(\.key))
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = visible ? 0.2 : 0.1
-            for panel in bars { panel.animator().alphaValue = visible ? 1 : 0 }
+            for panel in panelsShown { panel.animator().alphaValue = visible ? 1 : 0 }
         }
-        for panel in bars { panel.ignoresMouseEvents = !visible }
+        for panel in panelsShown { panel.ignoresMouseEvents = !visible }
+    }
+
+    private func clearPointer(on ids: [CGDirectDisplayID]) {
+        let keys = Set(ids.map(String.init))
+        if !model.pointerInBar.isDisjoint(with: keys) { model.pointerInBar.subtract(keys) }
     }
 
     // MARK: What it shows
 
+    /// Reads the desktops on their own queue, since that asks the window server about every
+    /// window; a request while one is being read is answered by one more read once it's done.
     private func refreshDesktops() {
         // Even without the desktops in the bar: their colours, and lock-in mode, follow the desktop you're on.
         guard running else { return }
-        let desktops = DesktopReader.read()
+        guard !readingDesktops else { return desktopsAgain = true }
+        readingDesktops = true
+        desktopQueue.async { [weak self] in
+            let desktops = DesktopReader.read()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.readingDesktops = false
+                    if self.desktopsAgain {
+                        self.desktopsAgain = false
+                        self.refreshDesktops()
+                    }
+                    self.show(desktops)
+                }
+            }
+        }
+    }
+
+    private func show(_ desktops: [String: [Desktop]]) {
+        guard running else { return }
         if desktops != model.desktops {
             let sharedBefore = model.desktops.keys.contains("Main")
             model.desktops = desktops
@@ -934,6 +990,9 @@ final class TopBarController {
         // Clear Dock itself coming forward for a moment (an alert, its settings) changes nothing:
         // the bar shouldn't drop back over a game for it.
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() { return }
+        // Nor does macOS itself coming forward (the lock screen, a password prompt, the screen saver):
+        // the bar would slide away when the Mac locks and back again when you unlock it.
+        if let front = NSWorkspace.shared.frontmostApplication, front.activationPolicy != .regular { return }
         var covered = Set<CGDirectDisplayID>()
         if let front = NSWorkspace.shared.frontmostApplication {
             let pid = front.processIdentifier
@@ -961,10 +1020,13 @@ final class TopBarController {
     }
 
     private func scheduleCoverCheck() {
-        for delay in [1.0, 3.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        pendingCoverChecks.forEach { $0.cancel() }
+        pendingCoverChecks = [1.0, 3.0].map { delay in
+            let work = DispatchWorkItem { [weak self] in
                 MainActor.assumeIsolated { self?.checkCovered() }
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return work
         }
     }
 
@@ -981,7 +1043,8 @@ final class TopBarController {
         }
         let name = app.localizedName ?? ""
         if model.appName != name { model.appName = name }
-        model.appIcon = model.icon(for: app.processIdentifier)
+        let icon = model.icon(for: app.processIdentifier)
+        if model.appIcon !== icon { model.appIcon = icon }
     }
 
     /// Updates the clock, then waits for the start of the next minute.
@@ -1061,8 +1124,10 @@ final class TopBarController {
         return (screen, panel.frame.minY)
     }
 
-    private func hoverDesktop(_ desktop: Desktop?) {
+    private func hoverDesktop(_ desktop: Desktop?, leaving left: Desktop? = nil) {
         guard let desktop, model.look.peekDesktops, !desktop.isCurrent, let bar = barUnderPointer() else {
+            // The pointer may already be on the next desktop, whose pop-up is on its way.
+            if let left, popover.wanted != nil, popover.wanted != "desktop-\(left.id)" { return }
             return popover.release()
         }
         let look = model.look
@@ -1078,9 +1143,9 @@ final class TopBarController {
         guard inside, model.look.miniPlayer, model.track != nil, let bar = barUnderPointer() else {
             return popover.release()
         }
-        if popover.showing != "song" { nowPlaying.refreshPosition() }
         popover.request("song", below: bar.bottom, on: bar.screen) { [weak self] in
             guard let self else { return AnyView(EmptyView()) }
+            self.nowPlaying.refreshPosition()
             return AnyView(MiniPlayerView(model: self.model))
         }
     }

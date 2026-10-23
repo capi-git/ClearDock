@@ -333,6 +333,15 @@ enum BarSettings {
 
     /// Whether "Automatically hide and show the menu bar" is set to Always.
     @MainActor static var macMenuBarHidden: Bool {
+        // Asked often (as the pointer moves along the top), so looked up at most once a second.
+        if let known = menuBarHiddenKnown, Date().timeIntervalSince(known.at) < 1 { return known.hidden }
+        let hidden = lookUpMenuBarHidden()
+        menuBarHiddenKnown = (hidden, Date())
+        return hidden
+    }
+    @MainActor private static var menuBarHiddenKnown: (hidden: Bool, at: Date)?
+
+    @MainActor private static func lookUpMenuBarHidden() -> Bool {
         CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
         if (CFPreferencesCopyAppValue("_HIHideMenuBar" as CFString, kCFPreferencesAnyApplication) as? NSNumber)?.boolValue == true {
             return true
@@ -420,6 +429,22 @@ enum SystemMenuBar {
         return (nil, problem.contains("-1743"))
     }
 
+    /// Puts it back away from the main thread, like `hide`, then says whether it worked.
+    static func restore(then done: @escaping @MainActor (Bool) -> Void) {
+        guard let saved = UserDefaults.standard.object(forKey: savedKey) as? Bool else { return done(true) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let answer = systemEvents("set autohide menu bar of dock preferences to \(saved)")
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    refused = answer.refused
+                    if answer.output != nil { UserDefaults.standard.removeObject(forKey: savedKey) }
+                    done(answer.output != nil)
+                }
+            }
+        }
+    }
+
+    /// Puts it back straight away, for when Clear Dock is quitting.
     static func restore() {
         let defaults = UserDefaults.standard
         guard let saved = defaults.object(forKey: savedKey) as? Bool else { return }

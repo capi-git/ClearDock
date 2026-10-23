@@ -5,7 +5,7 @@ import SwiftUI
 /// right items. Right-click anywhere on it for its settings. While a game is in front it can be
 /// just a thin line in the highlight colour.
 struct TopBarView: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let screenKey: String
 
     var body: some View {
@@ -44,7 +44,6 @@ struct TopBarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\.barLook, look)
         .environment(\.pointerInBar, model.pointerInBar.contains(screenKey))
-        .animation(.easeInOut(duration: 0.45), value: look)
 
     }
 
@@ -80,7 +79,7 @@ extension EnvironmentValues {
 }
 
 private struct BarItemView: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let kind: BarItemKind
     let desktopsKey: String
 
@@ -100,7 +99,7 @@ private struct BarItemView: View {
 // MARK: - Pieces
 
 private struct DesktopPills: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let key: String
     @Environment(\.barLook) private var look
 
@@ -111,11 +110,11 @@ private struct DesktopPills: View {
             // A piece for each desktop, with the apps on it.
             HStack(spacing: 6) {
                 ForEach(desktops) { desktop in
-                    Pill(look: look, highlighted: desktop.isCurrent, action: { DesktopSwitcher.go(to: desktop) }) {
+                    Pill(look: look, highlighted: desktop.isCurrent, action: { model.goToDesktop(desktop) }) {
                         label(desktop)
                         apps(desktop)
                     }
-                    .onHover { model.hoverDesktop($0 ? desktop : nil) }
+                    .onHover { if $0 { model.hoverDesktop(desktop) } else { model.leaveDesktop(desktop) } }
                     .contextMenu { menu(desktop) }
                 }
             }
@@ -128,8 +127,8 @@ private struct DesktopPills: View {
                             if look.desktopStyle != .apps || desktop.apps.isEmpty { label(desktop) }
                             if look.desktopStyle != .numbers { apps(desktop, showEmpty: false) }
                         }
-                        .onTapGesture { DesktopSwitcher.go(to: desktop) }
-                        .onHover { model.hoverDesktop($0 ? desktop : nil) }
+                        .onTapGesture { model.goToDesktop(desktop) }
+                        .onHover { if $0 { model.hoverDesktop(desktop) } else { model.leaveDesktop(desktop) } }
                         .contextMenu { menu(desktop) }
                     }
                 }
@@ -219,6 +218,7 @@ private struct Segment<Content: View>: View {
             .background {
                 if highlighted {
                     shape.fill(Color(nsColor: look.accent).opacity(0.95))
+                        .animation(.easeInOut(duration: 0.45), value: look.accent)
                 } else if hovering && pointerInBar {
                     shape.fill(Color.white.opacity(0.1))
                 }
@@ -229,7 +229,7 @@ private struct Segment<Content: View>: View {
 }
 
 private struct AppPill: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     @Environment(\.barLook) private var look
 
     var body: some View {
@@ -249,7 +249,7 @@ private struct AppPill: View {
 
 /// Lock-in mode for the desktop showing on this bar's screen. Shows how long it's been locked in.
 private struct LockInPill: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let desktopsKey: String
     @Environment(\.barLook) private var look
 
@@ -284,7 +284,7 @@ private struct LockInPill: View {
 }
 
 private struct SongPill: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let track: NowPlaying.Track
     @Environment(\.barLook) private var barLook
 
@@ -388,7 +388,7 @@ private struct SoundBars: NSViewRepresentable {
 }
 
 private struct VolumePill: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     @Environment(\.barLook) private var look
 
     var body: some View {
@@ -419,7 +419,7 @@ private struct VolumePill: View {
 }
 
 private struct BatteryPill: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let percent: Int
     @Environment(\.barLook) private var look
 
@@ -440,7 +440,7 @@ private struct BatteryPill: View {
 }
 
 private struct ClockPill: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     @Environment(\.barLook) private var look
 
     var body: some View {
@@ -479,8 +479,11 @@ struct Pill<Content: View>: View {
             .padding(.horizontal, (look.size.pillHeight * 0.4).rounded())
             .frame(height: look.size.pillHeight)
         Group {
-            if look.style == .glass && !highlighted {
-                label.glassEffect(.regular.tint(look.glassTint.map { Color(nsColor: $0).opacity(0.35) }), in: shape)
+            if look.style == .glass {
+                // One glass for the piece, highlighted or not, so it isn't remade on every desktop switch.
+                label
+                    .background { if highlighted { PillBackground(look: look, highlighted: true, shape: shape) } }
+                    .glassEffect(.regular.tint(look.glassTint.map { Color(nsColor: $0).opacity(0.35) }), in: shape)
             } else {
                 label.background { PillBackground(look: look, highlighted: highlighted, shape: shape) }
             }
@@ -503,19 +506,24 @@ private struct PillBackground: View {
     let shape: RoundedRectangle
 
     var body: some View {
-        if highlighted {
-            shape.fill(Color(nsColor: look.accent).opacity(0.92))
-                .overlay(shape.strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
-        } else if look.style == .none {
-            Color.clear
-        } else {
-            // The wallpaper blurred, tinted with the bar's colour, like frosted glass.
-            ZStack {
-                BehindWindowBlur().clipShape(shape)
-                shape.fill(Color(nsColor: look.fill).opacity(look.opacity))
+        Group {
+            if highlighted {
+                shape.fill(Color(nsColor: look.accent).opacity(0.92))
+                    .overlay(shape.strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
+            } else if look.style == .none {
+                Color.clear
+            } else {
+                // The wallpaper blurred, tinted with the bar's colour, like frosted glass.
+                ZStack {
+                    BehindWindowBlur().clipShape(shape)
+                    shape.fill(Color(nsColor: look.fill).opacity(look.opacity))
+                }
+                .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
             }
-            .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         }
+        // A desktop's colour coming or going fades in; nothing else waits for it.
+        .animation(.easeInOut(duration: 0.45), value: look.accent)
+        .animation(.easeInOut(duration: 0.45), value: look.fill)
     }
 }
 

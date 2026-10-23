@@ -11,6 +11,10 @@ final class BarPopover {
     private var hideWork: DispatchWorkItem?
     /// What's showing, such as "song" or "desktop-…".
     private(set) var showing: String?
+    /// What's about to show, after its short pause.
+    private var pending: String?
+    /// What's showing, or about to.
+    var wanted: String? { pending ?? showing }
     /// Checks where the pointer is while a pop-up is open, so it closes even if the system never
     /// said the pointer left (which can happen moving quickly off the bar).
     private var watch: Timer?
@@ -27,23 +31,29 @@ final class BarPopover {
     /// the next while a pop-up is open switches straight away.
     func request(_ id: String, below barBottom: CGFloat, on screen: NSScreen, content: @escaping @MainActor () -> AnyView) {
         hideWork?.cancel()
-        guard showing != id else { return }
+        guard showing != id else { return pending = nil }
         showWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.show(id, content(), below: barBottom, on: screen) }
+            MainActor.assumeIsolated {
+                self?.pending = nil
+                self?.show(id, content(), below: barBottom, on: screen)
+            }
         }
         showWork = work
+        pending = id
         DispatchQueue.main.asyncAfter(deadline: .now() + (showing == nil ? 0.35 : 0.05), execute: work)
     }
 
     /// The pointer left what the pop-up is for.
     func release() {
         showWork?.cancel()
+        pending = nil
         scheduleHide()
     }
 
     func hide() {
         showWork?.cancel()
+        pending = nil
         hideWork?.cancel()
         watch?.invalidate()
         watch = nil
@@ -51,6 +61,7 @@ final class BarPopover {
         showing = nil
         panel.orderOut(nil)
         panel.setContent(nil)
+        PeekShots.forgetSoon()
         MemoryRelief.soon()
     }
 
@@ -202,12 +213,22 @@ private struct PopoverBlur: NSViewRepresentable {
 /// A small picture of a desktop: its wallpaper with its windows laid out on it, as they are.
 /// Click a window to bring it forward, or anywhere else to go to that desktop.
 struct DesktopPeekView: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
     let desktop: Desktop
     let screen: NSScreen
     let look: BarLook
     let done: () -> Void
-    @StateObject private var shots = PeekShots()
+    @StateObject private var shots: PeekShots
+
+    init(model: TopBarModel, desktop: Desktop, screen: NSScreen, look: BarLook, done: @escaping () -> Void) {
+        self.model = model
+        self.desktop = desktop
+        self.screen = screen
+        self.look = look
+        self.done = done
+        // Whatever was taken moments ago shows straight away, rather than after a first frame without it.
+        _shots = StateObject(wrappedValue: PeekShots(screen: screen, windows: desktop.windows))
+    }
 
     private static let width: CGFloat = 380
 
@@ -238,8 +259,8 @@ struct DesktopPeekView: View {
                         .frame(width: frame.width, height: frame.height)
                         .offset(x: frame.minX, y: frame.minY)
                         .onTapGesture {
-                            WindowFocus.raise(window.id, of: window.app)
                             done()
+                            WindowFocus.raise(window.id, of: window.app)
                         }
                 }
             }
@@ -247,8 +268,8 @@ struct DesktopPeekView: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .contentShape(Rectangle())
             .onTapGesture {
-                DesktopSwitcher.go(to: desktop)
                 done()
+                DesktopSwitcher.go(to: desktop)
             }
         }
         .padding(10)
@@ -321,7 +342,7 @@ private struct Wallpaper: View {
 }
 
 /// Pictures of a desktop's windows, taken when the peek opens (Screen Recording permission is
-/// needed) and dropped when it closes.
+/// needed). They're kept while you move between desktops, and dropped a little after the peek closes.
 @MainActor
 final class PeekShots: ObservableObject {
     @Published var images: [CGWindowID: CGImage] = [:]
@@ -330,11 +351,38 @@ final class PeekShots: ObservableObject {
     /// The desktop picture as it looks, kept for a minute per screen so moving between desktops
     /// doesn't take it again each time.
     private static var wallpapers: [CGDirectDisplayID: (image: CGImage, taken: Date)] = [:]
+    /// Windows' pictures, kept for a few seconds: moving back to a desktop shows them at once.
+    private static var kept: [CGWindowID: (image: CGImage, taken: Date)] = [:]
+    private static var forgetting: DispatchWorkItem?
+
+    init(screen: NSScreen, windows: [DesktopWindow]) {
+        Self.forgetting?.cancel()
+        if let id = screen.displayID, let kept = Self.wallpapers[id], Date().timeIntervalSince(kept.taken) < 60 {
+            wallpaper = kept.image
+        }
+        for window in windows {
+            if let kept = Self.kept[window.id], Date().timeIntervalSince(kept.taken) < 5 { images[window.id] = kept.image }
+        }
+    }
+
+    /// Lets go of every picture once no peek has been open for a little while.
+    static func forgetSoon() {
+        forgetting?.cancel()
+        let work = DispatchWorkItem {
+            MainActor.assumeIsolated {
+                wallpapers.removeAll()
+                kept.removeAll()
+                shareable = nil
+            }
+        }
+        forgetting = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
+    }
 
     func loadWallpaper(of screen: NSScreen, size: CGSize) async {
         guard let id = screen.displayID else { return }
         if let kept = Self.wallpapers[id], Date().timeIntervalSince(kept.taken) < 60 {
-            wallpaper = kept.image
+            if wallpaper !== kept.image { wallpaper = kept.image }
             return
         }
         guard CGPreflightScreenCaptureAccess(),
@@ -365,18 +413,30 @@ final class PeekShots: ObservableObject {
             Self.shareable = (fresh, Date())
             content = fresh
         }
-        for window in windows.prefix(8) {
-            guard !Task.isCancelled, let match = content.windows.first(where: { $0.windowID == window.id }) else { continue }
-            let config = SCStreamConfiguration()
-            config.width = max(16, Int((window.frame.width * scale).rounded()))
-            config.height = max(16, Int((window.frame.height * scale).rounded()))
-            config.showsCursor = false
-            config.ignoreShadowsSingleWindow = true
-            if let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: match),
-                                                                        configuration: config) {
-                images[window.id] = image
+        // All at once, and shown together, rather than one after another with a redraw for each.
+        let wanted = windows.prefix(8).filter { images[$0.id] == nil }
+        let taken = await withTaskGroup(of: (CGWindowID, CGImage)?.self) { group -> [CGWindowID: CGImage] in
+            for window in wanted {
+                guard let match = content.windows.first(where: { $0.windowID == window.id }) else { continue }
+                let config = SCStreamConfiguration()
+                config.width = max(16, Int((window.frame.width * scale).rounded()))
+                config.height = max(16, Int((window.frame.height * scale).rounded()))
+                config.showsCursor = false
+                config.ignoreShadowsSingleWindow = true
+                let filter = SCContentFilter(desktopIndependentWindow: match)
+                group.addTask {
+                    guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else { return nil }
+                    return (window.id, image)
+                }
             }
+            var taken: [CGWindowID: CGImage] = [:]
+            for await result in group { if let (id, image) = result { taken[id] = image } }
+            return taken
         }
+        guard !Task.isCancelled, !taken.isEmpty else { return }
+        let now = Date()
+        for (id, image) in taken { Self.kept[id] = (image, now) }
+        images.merge(taken) { _, new in new }
     }
 }
 
@@ -384,7 +444,7 @@ final class PeekShots: ObservableObject {
 
 /// The album cover, the song, a progress bar you can click to jump, and the player's buttons.
 struct MiniPlayerView: View {
-    @ObservedObject var model: TopBarModel
+    let model: TopBarModel
 
     var body: some View {
         if let track = model.track {

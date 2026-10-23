@@ -406,8 +406,9 @@ final class NowPlaying {
                 guard let text, let url = URL(string: text), url.scheme == "https" else { return }
                 URLSession.shared.dataTask(with: url) { data, _, _ in
                     guard let data else { return }
+                    let cover = Self.smallCover(CGImageSourceCreateWithData(data as CFData, nil))
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { self?.setArtwork(NSImage(data: data), for: song) }
+                        MainActor.assumeIsolated { self?.setArtwork(cover, for: song) }
                     }
                 }.resume()
             }
@@ -423,11 +424,26 @@ final class NowPlaying {
                 return "\(file)"
                 """
             Self.run(script) { [weak self] text in
-                defer { try? FileManager.default.removeItem(atPath: file) }
-                guard let text else { return }
-                self?.setArtwork(NSImage(contentsOfFile: text), for: song)
+                DispatchQueue.global(qos: .utility).async {
+                    defer { try? FileManager.default.removeItem(atPath: file) }
+                    guard let text else { return }
+                    let cover = Self.smallCover(CGImageSourceCreateWithURL(URL(fileURLWithPath: text) as CFURL, nil))
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self?.setArtwork(cover, for: song) }
+                    }
+                }
             }
         }
+    }
+
+    /// The cover at the size it's shown (album covers can be thousands of pixels across), made
+    /// away from the main thread.
+    nonisolated private static func smallCover(_ source: CGImageSource?) -> NSImage? {
+        guard let source, let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 256,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ] as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width / 2, height: image.height / 2))
     }
 
     private func setArtwork(_ image: NSImage?, for song: Track) {
@@ -596,7 +612,11 @@ final class SystemVolume {
         guard level != nil else { return }
         var volume = Float32(min(1, max(0, value)))
         AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &volume)
+        // Known straight away, so quick scrolling carries on from here rather than from where the
+        // system last said it was.
+        level = Float(volume)
         if muted && volume > 0 { setMuted(false) }
+        onChange()
     }
 
     func toggleMute() { setMuted(!muted) }

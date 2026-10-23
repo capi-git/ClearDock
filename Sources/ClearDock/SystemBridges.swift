@@ -68,10 +68,9 @@ enum MemoryRelief {
         guard !scheduled else { return }
         scheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            MainActor.assumeIsolated {
-                scheduled = false
-                malloc_zone_pressure_relief(nil, 0)
-            }
+            MainActor.assumeIsolated { scheduled = false }
+            // It goes through all of the app's memory, so not on the main thread.
+            DispatchQueue.global(qos: .utility).async { _ = malloc_zone_pressure_relief(nil, 0) }
         }
     }
 }
