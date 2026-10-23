@@ -1,4 +1,5 @@
 import AppKit
+import Synchronization
 import ApplicationServices
 
 /// Reads notification counts from the macOS Dock. Apps now hand their counts only to the Dock,
@@ -184,9 +185,9 @@ enum AppWindowList {
 
 /// Games, which Clear Dock leaves alone: it never moves their windows, and the top bar steps
 /// aside while one is in front. An app counts as a game when it says so in its own settings.
-@MainActor
 enum Games {
-    private static var known: [pid_t: Bool] = [:]
+    /// Asked from the main thread and from the window keeper's, so kept behind a lock.
+    private static let known = Mutex<[pid_t: Bool]>([:])
 
     /// Game launchers that don't say they're games (League of Legends' says nothing, Riot Client's
     /// says developer tools), by the start of their bundle identifier.
@@ -194,13 +195,13 @@ enum Games {
                                     "com.epicgames.", "com.mojang."]
 
     static func isGame(_ pid: pid_t) -> Bool {
-        if let answer = known[pid] { return answer }
+        if let answer = known.withLock({ $0[pid] }) { return answer }
         let app = NSRunningApplication(processIdentifier: pid)
         let category = app?.bundleURL
             .flatMap { Bundle(url: $0)?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String }
         let bundle = app?.bundleIdentifier ?? ""
         let answer = category?.contains("games") == true || launchers.contains { bundle.hasPrefix($0) }
-        known[pid] = answer
+        known.withLock { $0[pid] = answer }
         return answer
     }
 }
