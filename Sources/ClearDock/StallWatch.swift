@@ -121,7 +121,8 @@ enum StallWatch {
         return n
     }
 
-    /// The innermost system call or two (where it was waiting) and Clear Dock's own functions.
+    /// The innermost system calls (where it was waiting, and what in macOS got it there, with the
+    /// part of macOS each is in) and Clear Dock's own functions.
     private static func describe(_ frames: UnsafeMutablePointer<UInt>, _ count: Int) -> String {
         var inner: [String] = []
         var ours: [String] = []
@@ -135,8 +136,10 @@ enum StallWatch {
             if image.hasSuffix("/ClearDock") {
                 if ours.last != name { ours.append(name) }
                 if ours.count == 8 { break }
-            } else if ours.isEmpty, inner.count < 2, inner.last != name {
-                inner.append(name)
+            } else if ours.isEmpty, inner.count < 6 {
+                let library = image.split(separator: "/").last.map(String.init) ?? "?"
+                let entry = "\(name) [\(library)]"
+                if inner.last != entry { inner.append(entry) }
             }
         }
         return (inner + ours).joined(separator: " ← ")
