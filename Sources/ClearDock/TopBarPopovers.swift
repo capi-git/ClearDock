@@ -545,9 +545,9 @@ private struct PlayerButton: View {
 
 // MARK: - Choosing two windows to lock in
 
-/// A small panel under the bar for choosing the two windows to lock in: the first you click goes
-/// on the left, the second on the right. It stays until you've chosen, press Escape, or click
-/// somewhere else.
+/// A small panel under the bar for choosing the windows to lock in: two (the first you click goes
+/// on the left, the second on the right) or three (top left, bottom left, then the big one on the
+/// right). It stays until you've chosen, press Escape, or click somewhere else.
 @MainActor
 final class LockInPicker {
     private let panel = PopoverPanel()
@@ -558,7 +558,8 @@ final class LockInPicker {
               done: @escaping ([LockIn.Choice]?) -> Void) {
         close()
         finish = done
-        let view = LockInPickerView(choices: Array(choices.prefix(10)), look: look, tucksOthers: BarSettings.lockInHideOthers) { [weak self] picked in
+        let view = LockInPickerView(choices: Array(choices.prefix(10)), look: look, tucksOthers: BarSettings.lockInHideOthers,
+                                    three: BarSettings.lockInThree && choices.count >= 3) { [weak self] picked in
             // After the click that chose them has finished.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.close(with: picked) } }
         }
@@ -601,26 +602,60 @@ private struct LockInPickerView: View {
     let choices: [LockIn.Choice]
     let look: BarLook
     let tucksOthers: Bool
+    @State var three: Bool
     let done: ([LockIn.Choice]) -> Void
-    @State private var left: CGWindowID?
+    /// The ones chosen so far, in order.
+    @State private var picked: [CGWindowID] = []
+
+    private var wanted: Int { three ? 3 : 2 }
+    /// Where each one chosen goes, in the order they're chosen.
+    private var places: [String] { three ? ["Top", "Bottom", "Right"] : ["Left", "Right"] }
+
+    private var instruction: String {
+        switch (three, picked.count) {
+        case (false, 0): "Choose the one for the left."
+        case (false, _): "Now the one for the right."
+        case (true, 0): "Choose the one for the top left."
+        case (true, 1): "Now the one under it."
+        case (true, _): "Now the big one on the right."
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Lock in two windows").font(.system(size: 13, weight: .bold, design: .rounded))
-                Text(left == nil ? "Choose the one for the left." : "Now the one for the right.")
-                    .font(.system(size: 12, design: .rounded)).opacity(0.7)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(three ? "Lock in three windows" : "Lock in two windows").font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text(instruction).font(.system(size: 12, design: .rounded)).opacity(0.7)
+                }
+                Spacer(minLength: 8)
+                if choices.count >= 3 {
+                    // Two side by side, or two stacked with a big one beside them; remembered for next time.
+                    Picker("", selection: $three) {
+                        Text("2").tag(false)
+                        Text("3").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .onChange(of: three) { _, now in
+                        BarSettings.lockInThree = now
+                        picked.removeAll()
+                    }
+                }
             }
             VStack(spacing: 2) {
                 ForEach(choices) { choice in
-                    PickerRow(choice: choice, isLeft: left == choice.id, look: look) {
-                        if left == choice.id {
-                            left = nil
-                        } else if let chosen = choices.first(where: { $0.id == left }) {
-                            done([chosen, choice])
-                        } else {
-                            left = choice.id
+                    let place = picked.firstIndex(of: choice.id).map { places[$0] }
+                    PickerRow(choice: choice, place: place, look: look) {
+                        if let index = picked.firstIndex(of: choice.id) {
+                            // Clicking one chosen again takes it (and any chosen after it) back.
+                            picked.removeSubrange(index...)
+                            return
                         }
+                        picked.append(choice.id)
+                        guard picked.count == wanted else { return }
+                        done(picked.compactMap { id in choices.first { $0.id == id } })
                     }
                 }
             }
@@ -639,7 +674,8 @@ private struct LockInPickerView: View {
 
 private struct PickerRow: View {
     let choice: LockIn.Choice
-    let isLeft: Bool
+    /// Where it goes, once chosen ("Left", "Top"…).
+    let place: String?
     let look: BarLook
     let action: () -> Void
     @State private var hovering = false
@@ -656,8 +692,8 @@ private struct PickerRow: View {
                 }
             }
             Spacer(minLength: 0)
-            if isLeft {
-                Text("Left")
+            if let place {
+                Text(place)
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(look.onAccent)
                     .padding(.horizontal, 7)
@@ -667,7 +703,7 @@ private struct PickerRow: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(isLeft ? 0.16 : hovering ? 0.1 : 0)))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(place != nil ? 0.16 : hovering ? 0.1 : 0)))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)

@@ -266,11 +266,15 @@ private struct LockInPill: View {
                     Text("Locked in · " + Self.elapsed(since: started, at: context.date)).monospacedDigit()
                 }
             } else {
-                Text(choosing ? "Choose two…" : model.lockInStarting ? "Locking in…" : "Lock in")
+                Text(choosing ? "Choose windows…" : model.lockInStarting ? "Locking in…" : "Lock in")
             }
         }
         .contextMenu {
             Button(started != nil ? "Unlock This Desktop" : "Lock In This Desktop") { model.toggleLockIn() }
+            Toggle("Three Windows", isOn: Binding(get: { BarSettings.lockInThree }, set: { on in
+                BarSettings.lockInThree = on
+                NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+            }))
             Divider()
             Button("Hide Lock In") { model.hide(.lockIn) }
             BarSettingsButton()

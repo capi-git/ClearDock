@@ -265,6 +265,24 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "lockIn.split") }
     }
 
+    /// Three windows instead of two: two stacked in a column on the left and a big one beside them.
+    static var lockInThree: Bool {
+        get { defaults.bool(forKey: "lockIn.three") }
+        set { defaults.set(newValue, forKey: "lockIn.three") }
+    }
+
+    /// With three: how much of the width the stacked column gets.
+    static var lockInStackColumn: Double {
+        get { defaults.object(forKey: "lockIn.stackColumn") == nil ? 0.3 : min(0.7, max(0.1, defaults.double(forKey: "lockIn.stackColumn"))) }
+        set { defaults.set(newValue, forKey: "lockIn.stackColumn") }
+    }
+
+    /// With three: how much of the column's height the top one gets.
+    static var lockInStackRows: Double {
+        get { defaults.object(forKey: "lockIn.stackRows") == nil ? 0.45 : min(0.9, max(0.1, defaults.double(forKey: "lockIn.stackRows"))) }
+        set { defaults.set(newValue, forKey: "lockIn.stackRows") }
+    }
+
     /// The gap around and between the two apps, where the wallpaper shows.
     static var lockInGap: Double {
         get { defaults.object(forKey: "lockIn.gap") == nil ? 12 : defaults.double(forKey: "lockIn.gap") }
@@ -284,7 +302,8 @@ enum BarSettings {
     }
 
     /// Apps lock-in mode leaves alone, by bundle identifier: they open on a locked-in desktop as
-    /// usual, aren't tucked away, and don't count as one of the apps there. Music players to start with.
+    /// usual, aren't tucked away, and don't count when two apps lock in straight away (though you
+    /// can still choose one). Music players to start with.
     static var lockInAllowedApps: [String] {
         get { defaults.stringArray(forKey: "lockIn.allowedApps") ?? ["com.spotify.client", "com.apple.Music"] }
         set { defaults.set(newValue, forKey: "lockIn.allowedApps") }

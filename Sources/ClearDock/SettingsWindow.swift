@@ -192,6 +192,7 @@ final class SettingsStore: ObservableObject {
 
     // Lock-in mode
     @Published var lockInHideOthers = true { didSet { barEdit { BarSettings.lockInHideOthers = lockInHideOthers } } }
+    @Published var lockInThree = false { didSet { barEdit { BarSettings.lockInThree = lockInThree } } }
     @Published var lockInBorder = true { didSet { barEdit { BarSettings.lockInBorder = lockInBorder } } }
     @Published var lockInGap = 12.0 { didSet { barEdit { BarSettings.lockInGap = lockInGap } } }
     @Published var lockInFrostedCovers = false { didSet { barEdit { BarSettings.lockInFrostedCovers = lockInFrostedCovers } } }
@@ -386,6 +387,7 @@ final class SettingsStore: ObservableObject {
         gameMode = BarSettings.gameMode
         menuBarDelay = BarSettings.menuBarDelay
         lockInHideOthers = BarSettings.lockInHideOthers
+        lockInThree = BarSettings.lockInThree
         lockInBorder = BarSettings.lockInBorder
         lockInGap = BarSettings.lockInGap
         lockInFrostedCovers = BarSettings.lockInFrostedCovers
@@ -902,6 +904,7 @@ private struct DesktopsTab: View {
 
             Section {
                 Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
+                Toggle("Three windows: two stacked, one beside them", isOn: $store.lockInThree)
                 Toggle("Tuck away the other windows", isOn: $store.lockInHideOthers)
                 Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
                 LabeledContent("Apps left alone") {
