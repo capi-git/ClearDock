@@ -22,6 +22,9 @@ final class WallpaperPalette {
 
     private var task: Task<Void, Never>?
     private var lastLooked: Date?
+    /// What each desktop's wallpaper looked like, and when: going back to a desktop seen in the last
+    /// minute uses that, rather than taking a picture of the screen again.
+    private var seen: [UInt64: (colors: (base: NSColor, top: NSColor, accents: [NSColor]), at: Date)] = [:]
 
     /// Looks at the wallpaper again, a moment after the last time it's asked: desktop switches in a
     /// row, and the dock and the bar asking together, make one look, taken once a switch has
@@ -31,21 +34,35 @@ final class WallpaperPalette {
         guard let screen else { return }
         if unlessRecent, let lastLooked, Date().timeIntervalSince(lastLooked) < 30 { return }
         task?.cancel()
+        let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        let size = CGSize(width: 96, height: max(24, (96 * screen.frame.height / screen.frame.width).rounded()))
+        let file = NSWorkspace.shared.desktopImageURL(for: screen)
         task = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(0.9))
-            guard !Task.isCancelled, let image = await Self.wallpaperImage(for: screen) else { return }
+            guard !Task.isCancelled else { return }
+            let desktop = WindowSpaces.currentSpaceID(on: screen)
+            if !unlessRecent, let desktop, let kept = self?.seen[desktop], Date().timeIntervalSince(kept.at) < 60 {
+                self?.use(kept.colors)
+                return
+            }
+            guard let image = await Self.wallpaperImage(display: displayID, size: size, file: file) else { return }
             self?.lastLooked = Date()
             guard let self, !Task.isCancelled, let colors = Self.colors(in: image) else { return }
-            // A live wallpaper (from an app like Wallspace) looks a little different each time it's
-            // looked at; only a real change of wallpaper should change the colours.
-            if Self.near(colors.base, self.base) && Self.near(colors.top, self.top)
-                && colors.accents.count == self.accents.count
-                && zip(colors.accents, self.accents).allSatisfy({ Self.near($0, $1) }) { return }
-            self.base = colors.base
-            self.top = colors.top
-            self.accents = colors.accents
-            NotificationCenter.default.post(name: Self.didChange, object: nil)
+            if let desktop { self.seen[desktop] = (colors, Date()) }
+            self.use(colors)
         }
+    }
+
+    private func use(_ colors: (base: NSColor, top: NSColor, accents: [NSColor])) {
+        // A live wallpaper (from an app like Wallspace) looks a little different each time it's
+        // looked at; only a real change of wallpaper should change the colours.
+        if Self.near(colors.base, base) && Self.near(colors.top, top)
+            && colors.accents.count == accents.count
+            && zip(colors.accents, accents).allSatisfy({ Self.near($0, $1) }) { return }
+        base = colors.base
+        top = colors.top
+        accents = colors.accents
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
     /// Whether two colours look about the same.
@@ -55,26 +72,27 @@ final class WallpaperPalette {
         return (dr * dr + dg * dg + db * db).squareRoot() < 0.12
     }
 
-    /// A small picture of the desktop with no windows on it.
-    private static func wallpaperImage(for screen: NSScreen) async -> CGImage? {
-        let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    /// A small picture of the desktop with no windows on it, made away from the main thread.
+    nonisolated private static func wallpaperImage(display displayID: CGDirectDisplayID?, size: CGSize, file: URL?) async -> CGImage? {
         if CGPreflightScreenCaptureAccess(),
            let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
            let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first {
             // Leave out every ordinary window (and anything above them), keeping the wallpaper.
             let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
             let config = SCStreamConfiguration()
-            config.width = 96
-            config.height = max(24, Int(96 * screen.frame.height / screen.frame.width))
+            config.width = Int(size.width)
+            config.height = Int(size.height)
             config.showsCursor = false
             if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
                 return image
             }
         }
-        // Without Screen Recording permission, fall back to the wallpaper picture file.
-        guard let url = NSWorkspace.shared.desktopImageURL(for: screen), let picture = NSImage(contentsOf: url) else { return nil }
-        var rect = CGRect(x: 0, y: 0, width: 96, height: 54)
-        return picture.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        // Without Screen Recording permission, fall back to the wallpaper picture file, read at the
+        // small size it's needed at (wallpapers can be 6K pictures).
+        guard let file, let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 96,
+        ] as CFDictionary)
     }
 
     static func colors(in image: CGImage) -> (base: NSColor, top: NSColor, accents: [NSColor])? {

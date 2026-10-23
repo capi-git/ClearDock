@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import ScreenCaptureKit
+import Synchronization
 import os
 
 /// Notes about preview clicks, readable with: log show --predicate 'subsystem == "local.cleardock"'
@@ -33,11 +34,28 @@ enum WindowCapture {
         }
     }
 
+    /// The system's list of windows, kept for a couple of seconds: moving along the dock from one
+    /// icon to the next needn't ask for every window on every desktop each time.
+    private static let listing = Mutex<(content: SCShareableContent, taken: Date)?>(nil)
+    /// Pictures just taken, kept for a few seconds, so going back to an icon shows them at once.
+    private static let recent = Mutex<[CGWindowID: (shot: WindowShot, taken: Date)]>([:])
+
+    private static func shareableContent() async -> SCShareableContent? {
+        if let kept = listing.withLock({ $0 }), Date().timeIntervalSince(kept.taken) < 2 { return kept.content }
+        guard let fresh = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) else { return nil }
+        listing.withLock { $0 = (fresh, Date()) }
+        return fresh
+    }
+
+    /// Lets go of the kept list and pictures (once the previews have closed for a while).
+    static func forget() {
+        listing.withLock { $0 = nil }
+        recent.withLock { $0.removeAll() }
+    }
+
     /// Thumbnails of the app's normal windows, front-most first.
     static func shots(of pid: pid_t, scale: CGFloat) async -> [WindowShot] {
-        guard hasPermission,
-              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
-        else { return [] }
+        guard hasPermission, let content = await shareableContent() else { return [] }
 
         // Only real windows: on screen now, listed by the app itself (which keeps minimized
         // ones), or placed on one of your desktops. Hidden background "ghost" windows are skipped.
@@ -54,15 +72,30 @@ enum WindowCapture {
         let ordered = windows.sorted { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }.prefix(6)
 
         var results: [(Int, WindowShot)] = []
+        let now = Date()
+        let kept = recent.withLock { $0 }
         await withTaskGroup(of: (Int, WindowShot)?.self) { group in
             for (i, window) in ordered.enumerated() {
-                group.addTask { await capture(window, scale: scale).map { (i, $0) } }
+                if let kept = kept[window.windowID], now.timeIntervalSince(kept.taken) < 3, kept.shot.image.width > 0 {
+                    results.append((i, kept.shot))
+                    continue
+                }
+                group.addTask {
+                    // Moved on to another icon already: don't ask for a picture nobody will see.
+                    guard !Task.isCancelled else { return nil }
+                    return await capture(window, scale: scale).map { (i, $0) }
+                }
             }
             for await result in group {
                 if let result { results.append(result) }
             }
         }
-        return results.sorted { $0.0 < $1.0 }.map(\.1)
+        let shots = results.sorted { $0.0 < $1.0 }.map(\.1)
+        recent.withLock { kept in
+            kept = kept.filter { now.timeIntervalSince($0.value.taken) < 3 }
+            for shot in shots where kept[shot.windowID] == nil { kept[shot.windowID] = (shot, now) }
+        }
+        return shots
     }
 
     private static func capture(_ window: SCWindow, scale: CGFloat) async -> WindowShot? {
@@ -99,23 +132,32 @@ enum WindowFocus {
 
     static func raise(_ windowID: CGWindowID, of pid: pid_t) {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        if let window = element(for: windowID, of: pid) { return focus(windowID, of: app, window: window) }
         // A window on another desktop: macOS brings its app forward without going there, so
         // nothing seems to happen. Go to that desktop first, as the top bar's desktop buttons do,
-        // and bring the window forward once it's showing.
-        if element(for: windowID, of: pid) == nil, let desktop = desktop(holding: windowID), DesktopSwitcher.switchTo(desktop) {
-            previewLog.notice("Preview click: window \(windowID) is on desktop \(desktop.number); going there first")
-            whenShowing(desktop.id, waited: 0) { focus(windowID, of: app) }
-            return
+        // and bring the window forward once it's showing. Finding its desktop asks the window
+        // server about every window, so that's done off the main thread.
+        let pointer = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }?.displayUUID
+        DispatchQueue.global(qos: .userInitiated).async {
+            let desktop = desktop(holding: windowID, onDisplay: pointer)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let desktop, DesktopSwitcher.switchTo(desktop) {
+                        previewLog.notice("Preview click: window \(windowID) is on desktop \(desktop.number); going there first")
+                        whenShowing(desktop.id, waited: 0) { focus(windowID, of: app, window: element(for: windowID, of: pid)) }
+                    } else {
+                        focus(windowID, of: app, window: nil)
+                    }
+                }
+            }
         }
-        focus(windowID, of: app)
     }
 
     /// The ordinary desktop a window is on, when it isn't showing and is on the display under
     /// the pointer (the one the desktop shortcuts act on).
-    private static func desktop(holding windowID: CGWindowID) -> Desktop? {
+    nonisolated private static func desktop(holding windowID: CGWindowID, onDisplay pointer: String?) -> Desktop? {
         let spaces = WindowSpaces.spaceIDs(of: windowID)
         guard spaces.count == 1 else { return nil }
-        let pointer = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }?.displayUUID
         return DesktopReader.read()
             .filter { $0.key == "Main" || $0.key == pointer }
             .values.joined()
@@ -132,14 +174,13 @@ enum WindowFocus {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { whenShowing(space, waited: waited + 0.05, then: then) }
     }
 
-    private static func focus(_ windowID: CGWindowID, of app: NSRunningApplication) {
+    private static func focus(_ windowID: CGWindowID, of app: NSRunningApplication, window: AXUIElement?) {
         let pid = app.processIdentifier
         // The click landed on Clear Dock, so it may become active for a moment and hand focus on.
         NSApp.activate()
         NSApp.yieldActivation(to: app)
 
         // Put the chosen window on top of the app's others first, so it's the one that comes forward.
-        let window = element(for: windowID, of: pid)
         var activated = false
         if let window {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
@@ -160,10 +201,6 @@ enum WindowFocus {
 
         // If macOS didn't let the app come forward, open it the way a Dock click does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            // Whether it was the window you clicked that came forward, for checking with `log show`.
-            let front = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
-                .first { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }?[kCGWindowNumber as String] as? CGWindowID
-            previewLog.notice("Preview click: the clicked window is in front: \(front == windowID)")
             // Not Finder: opening it again is how you ask it for a new window.
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier != pid, app.bundleIdentifier != "com.apple.finder",
                   let url = app.bundleURL else { return }
@@ -522,7 +559,7 @@ final class WindowPreviewController {
         cancelClose()
         if shownAppID == item.id && panel.isVisible { return }
         // Wait a moment before the first preview; once one is open, switching is quick.
-        let delay = panel.isVisible ? 0.06 : 0.4
+        let delay = panel.isVisible ? 0.12 : 0.4
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.open(item.id, pid: pid, anchor: anchor, screen: screen, scale: scale, edge: edge) }
         }
@@ -537,14 +574,28 @@ final class WindowPreviewController {
         shownAppID = nil
         pid = nil
         pointerInPanel = false
-        if panel.isVisible { MemoryRelief.soon() }
+        if panel.isVisible {
+            forgetSoon()
+            MemoryRelief.soon()
+        }
         panel.dismiss()
         watch?.invalidate()
         watch = nil
     }
 
+    private var forgetting: DispatchWorkItem?
+
+    /// The kept window list and pictures go once previews have been closed for a little while.
+    private func forgetSoon() {
+        forgetting?.cancel()
+        let work = DispatchWorkItem { WindowCapture.forget() }
+        forgetting = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: work)
+    }
+
     private func startWatching() {
         guard watch == nil else { return }
+        forgetting?.cancel()
         misses = 0
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {

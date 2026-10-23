@@ -145,7 +145,23 @@ final class DockModel {
         ]
         for name in names {
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.reload() }
+                MainActor.assumeIsolated { self?.reloadSoon() }
+            }
+        }
+    }
+
+    private var reloadPending = false
+
+    /// Several apps often open, quit or hide together ("Hide Others", quitting a few at once):
+    /// one reload for all of them, a moment later, rather than one each, back to back.
+    private func reloadSoon() {
+        guard !reloadPending else { return }
+        reloadPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reloadPending = false
+                self.reload()
             }
         }
     }

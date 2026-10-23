@@ -95,6 +95,10 @@ final class DockController {
     private var trashTimer: Timer?
     private var pendingResize: DispatchWorkItem?
     private var badgeTimer: Timer?
+    /// Sliding in or out right now. Changes meanwhile (a badge, an app opening) wait until it's
+    /// done, so the slide isn't cut short by the window jumping to its new size.
+    private var sliding = false
+    private var changedWhileSliding = false
     /// For checking badge drawing: launch with `-previewBadges 5` to put that count on every app.
     private let previewBadge = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)["previewBadges"] as? String
 
@@ -159,6 +163,17 @@ final class DockController {
 
         NotificationCenter.default.addObserver(forName: LockIn.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkLockIn() }
+        }
+
+        // Nothing to show while the displays sleep: no badge reading then.
+        workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopBadgeUpdates() }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.shown else { return }
+                self.startBadgeUpdates()
+            }
         }
 
         // After sleep, and when an app quits (a full-screen one, say), look again at whether the dock
@@ -319,6 +334,10 @@ final class DockController {
     }
 
     private func modelChanged() {
+        if sliding {
+            changedWhileSliding = true
+            return
+        }
         container.barRect = model.layout.barRect()
         pendingResize?.cancel()
         pendingResize = nil
@@ -346,11 +365,15 @@ final class DockController {
             view.update(animated: true)
         } else {
             // An app quit: glide the icons together inside the old width, then narrow the window.
+            // The bar is shifted along with them meanwhile, so it stays centred under them.
+            let bar = model.layout.barRect()
+            container.barRect = vertical ? bar.offsetBy(dx: 0, dy: half) : bar.offsetBy(dx: half, dy: 0)
             view.update(animated: true, offset: half)
             let work = DispatchWorkItem { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, let screen = self.currentScreen else { return }
                     self.panel.setFrame(self.frame(on: screen, visible: self.shown), display: false)
+                    self.container.barRect = self.model.layout.barRect()
                     self.view.update(animated: false)
                 }
             }
@@ -383,14 +406,17 @@ final class DockController {
         guard let screen else { return }
         if !shown { dockLog.notice("Dock: showing (\(reason, privacy: .public))") }
         cancelHide()
-        if !shown || self.screen != screen {
-            let movedScreen = self.screen != screen
+        let movedScreen = self.screen != screen
+        if !shown || movedScreen {
             self.screen = screen
             view.scale = screen.backingScaleFactor
             // Matching the bar: the bar on this screen (it may have its own desktop's colour).
             if movedScreen && Appearance.matchesBar { applyBackground() }
-            panel.setFrame(frame(on: screen, visible: false), display: false)
-            panel.alphaValue = 0
+            // From just off the edge, unless it's still on its way out: then it turns round from there.
+            if !panel.isVisible || movedScreen {
+                panel.setFrame(frame(on: screen, visible: false), display: false)
+                panel.alphaValue = 0
+            }
         }
         shown = true
         model.refreshTrash()
@@ -401,12 +427,15 @@ final class DockController {
 
         let target = frame(on: screen, visible: true)
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
+            beginSlide()
+            NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.12
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().setFrame(target, display: true)
                 panel.animator().alphaValue = 1
-            }
+            }, completionHandler: {
+                MainActor.assumeIsolated { self.slideFinished() }
+            })
         } else {
             panel.setFrame(target, display: true)
             panel.alphaValue = 1
@@ -430,19 +459,39 @@ final class DockController {
             self.panel.orderOut(nil)
         }
         if animated {
+            beginSlide()
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.12
                 context.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 panel.animator().setFrame(target, display: true)
                 panel.animator().alphaValue = 0
             }, completionHandler: {
-                MainActor.assumeIsolated { finish() }
+                MainActor.assumeIsolated {
+                    self.slideFinished()
+                    finish()
+                }
             })
         } else {
             panel.setFrame(target, display: false)
             panel.alphaValue = 0
             finish()
         }
+    }
+
+    private func beginSlide() {
+        sliding = true
+        // In case macOS never says the slide finished, catch up shortly after it should have.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            MainActor.assumeIsolated { if self?.sliding == true { self?.slideFinished() } }
+        }
+    }
+
+    /// Catches up on whatever changed while the dock was sliding.
+    private func slideFinished() {
+        sliding = false
+        guard changedWhileSliding else { return }
+        changedWhileSliding = false
+        modelChanged()
     }
 
     /// After the pointer leaves the icons, wait a moment, then hide unless it came back
@@ -491,7 +540,14 @@ final class DockController {
         let settled = frame(on: screen, visible: true)
         let icon = model.layout.frames[index]
         // The icon's place on screen (the view measures from the top, the screen from the bottom).
-        let anchor = NSRect(x: settled.minX + icon.minX, y: settled.maxY - icon.maxY, width: icon.width, height: icon.height)
+        var anchor = NSRect(x: settled.minX + icon.minX, y: settled.maxY - icon.maxY, width: icon.width, height: icon.height)
+        // Out past the dock's own window, which has room for a magnified or lifted icon: a preview
+        // over the icon would take the pointer off the dock, and the icon would shrink and grow again.
+        switch edge {
+        case .bottom: anchor.origin.y = max(anchor.origin.y, settled.maxY - 4 - anchor.height)
+        case .left: anchor.origin.x = max(anchor.origin.x, settled.maxX - 4 - anchor.width)
+        case .right: anchor.origin.x = min(anchor.origin.x, settled.minX + 4)
+        }
         previews.hover(over: model.items[index], pid: model.processID(at: index), anchor: anchor,
                        screen: screen, scale: screen.backingScaleFactor, edge: edge)
     }
@@ -507,10 +563,11 @@ final class DockController {
             return
         }
         refreshBadges()
-        let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
+        // Reading them goes through every item in the macOS Dock, so not too often.
+        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshBadges() }
         }
-        timer.tolerance = 1
+        timer.tolerance = 1.5
         RunLoop.main.add(timer, forMode: .default)
         badgeTimer = timer
     }

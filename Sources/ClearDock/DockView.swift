@@ -154,11 +154,13 @@ final class DockView: NSView {
             configure(&entry, for: item, layout: layout, frame: local, pixels: pixels, renderedAny: &renderedAny)
             CATransaction.commit()
 
-            // The icon being dragged follows the pointer instead.
-            if item.id != draggedID {
-                entry.container.position = CGPoint(x: target.midX, y: target.midY)
+            // The icon being dragged follows the pointer instead. Only an icon whose place changed is
+            // given a new one (and so a glide); while magnifying, the wave just below places them.
+            let position = CGPoint(x: target.midX, y: target.midY)
+            if item.id != draggedID, entry.container.position != position, !magnifyingNow {
+                entry.container.position = position
             }
-            entry.dot.opacity = dotOpacity
+            if entry.dot.opacity != dotOpacity { entry.dot.opacity = dotOpacity }
             if item.isRunning { entry.icon.removeAnimation(forKey: "opening") }
             if isNew && animated { animateIn(entry.container) }
             itemLayers[item.id] = entry
@@ -179,8 +181,17 @@ final class DockView: NSView {
         iconCache = iconCache.filter { usedKeys.contains($0.key) }
         updateStates()
         // Keep magnifying where the pointer is, if the row changed under it.
-        if let magnifyPosition, isPointerInside { magnify(at: magnifyPosition, animated: false) }
+        if let magnifyPosition, isPointerInside { magnify(at: magnifyPosition, animated: animated) }
+        // The icon under the pointer may be a different one now (an app opened or quit, or the row
+        // was reordered): hover follows what's actually under it.
+        if isPointerInside, let window, draggedID == nil {
+            setHovered(model.index(at: convert(window.mouseLocationOutsideOfEventStream, from: nil)))
+        }
         if renderedAny { MemoryRelief.soon() }
+    }
+
+    private var magnifyingNow: Bool {
+        Appearance.hoverEffect == .magnify && magnifyPosition != nil && isPointerInside
     }
 
     /// Moves every icon along the row at once, with no animation.
@@ -393,14 +404,22 @@ final class DockView: NSView {
         let layout = model.layout
         let out = layout.outward
         let magnifying = Appearance.hoverEffect == .magnify && magnifyPosition != nil
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.14)
+        defer { CATransaction.commit() }
+        func set(_ layer: CALayer, _ transform: CGAffineTransform) {
+            if layer.affineTransform() != transform { layer.setAffineTransform(transform) }
+        }
         for (i, item) in model.items.enumerated() where item.kind != .separator {
             guard let entry = itemLayers[item.id] else { continue }
             let base: Float = item.isQuitting ? 0.35 : (item.isHidden ? 0.5 : 1)
-            entry.icon.opacity = pressedIndex == i ? base * 0.6 : base
+            let opacity = pressedIndex == i ? base * 0.6 : base
+            if entry.icon.opacity != opacity { entry.icon.opacity = opacity }
             let lifted = dropIndex == i || item.id == draggedID
-            entry.container.zPosition = item.id == draggedID ? 1 : 0
+            let z: CGFloat = item.id == draggedID ? 1 : 0
+            if entry.container.zPosition != z { entry.container.zPosition = z }
             if lifted {
-                entry.icon.setAffineTransform(CGAffineTransform(scaleX: 1.12, y: 1.12))
+                set(entry.icon, CGAffineTransform(scaleX: 1.12, y: 1.12))
                 continue
             }
             // Magnification sets its own sizes as the pointer moves.
@@ -418,8 +437,8 @@ final class DockView: NSView {
                     transform = CGAffineTransform(translationX: out.dx * push, y: out.dy * push)
                 }
             }
-            entry.icon.setAffineTransform(transform)
-            entry.badge.setAffineTransform(.identity)
+            set(entry.icon, transform)
+            set(entry.badge, .identity)
         }
     }
 
@@ -658,6 +677,19 @@ final class DockView: NSView {
         case .right: CGPoint(x: frame.minX - 8 - size.width, y: (frame.midY - size.height / 2).rounded())
         }
         menu.popUp(positioning: nil, at: origin, in: self)
+        pointerMayHaveLeft()
+    }
+
+    /// While a menu or a dialog is open, the dock isn't told when the pointer leaves; once it's
+    /// closed, check, so the dock doesn't stay magnified, highlighted or up.
+    func pointerMayHaveLeft() {
+        guard isPointerInside, let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard !bounds.contains(point) else { return }
+        isPointerInside = false
+        setHovered(nil)
+        magnify(at: nil, animated: true)
+        onExit?()
     }
 
     // MARK: Dropping files onto an app or the Trash
