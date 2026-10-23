@@ -1,5 +1,5 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 
 /// Keeps windows from going under Clear Dock while it stays on screen, the way the macOS Dock
 /// does when it isn't hidden, and out from under the top bar. A window that ends up reaching into
@@ -155,7 +155,7 @@ final class DockSpaceKeeper {
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = observer
-        for window in windows(of: app) { watchWindow(window, of: pid, observer: observer) }
+        for window in Self.windows(of: app) { watchWindow(window, of: pid, observer: observer) }
     }
 
     private func unwatch(_ pid: pid_t) {
@@ -185,9 +185,9 @@ final class DockSpaceKeeper {
         }
         // The notification may name the app rather than a window; then check its focused window.
         let window: AXUIElement
-        if role(of: element) == kAXWindowRole {
+        if Self.role(of: element) == kAXWindowRole {
             window = element
-        } else if let focused = attribute(element, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() {
+        } else if let focused = Self.attribute(element, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() {
             window = focused as! AXUIElement
         } else {
             return
@@ -210,7 +210,7 @@ final class DockSpaceKeeper {
                 if NSEvent.pressedMouseButtons != 0 {
                     self.scheduleFit(window)
                 } else {
-                    self.fit(window)
+                    self.fitInBackground(window)
                 }
             }
         }
@@ -247,11 +247,28 @@ final class DockSpaceKeeper {
                   let frame = CGRect(dictionaryRepresentation: bounds) else { continue }
             if strips.contains(where: { Self.reaches(frame, into: $0) }) { reaching.insert(pid) }
         }
-        for pid in reaching {
-            let app = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(app, 0.35)
-            for window in windows(of: app) { fit(window) }
+        let pids = reaching.filter { !Games.isGame($0) }
+        guard !pids.isEmpty else { return }
+        fitQueue.async {
+            for pid in pids {
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 0.35)
+                for window in Self.windows(of: app) { Self.fit(window, into: strips) }
+            }
         }
+    }
+
+    /// Fitting asks apps about their windows, which takes a while when an app is busy: it's done
+    /// here, one window after another, so it never holds up the dock, the bar or lock-in.
+    private let fitQueue = DispatchQueue(label: "ClearDock.WindowKeeper", qos: .userInitiated)
+
+    private func fitInBackground(_ window: AXUIElement) {
+        // Games are left alone.
+        var pid: pid_t = 0
+        if AXUIElementGetPid(window, &pid) == .success, Games.isGame(pid) { return }
+        let strips = strips
+        guard !strips.isEmpty else { return }
+        fitQueue.async { Self.fit(window, into: strips) }
     }
 
     /// Whether a window (in the system's window coordinates) reaches into a strip on its screen.
@@ -267,23 +284,23 @@ final class DockSpaceKeeper {
 
     // MARK: Fitting a window
 
-    private func fit(_ window: AXUIElement) {
+    /// Fits a window out of the strips. Runs on `fitQueue`: it asks the app about its window, which
+    /// can take a while when the app is busy.
+    nonisolated private static func fit(_ window: AXUIElement, into strips: [Strip]) {
         let started = CACurrentMediaTime()
         defer {
             let ms = Int((CACurrentMediaTime() - started) * 1000)
             if ms > 30 { previewLog.notice("Timing: checking a window took \(ms) ms") }
         }
-        let strips = strips
         guard !strips.isEmpty else { return }
         AXUIElementSetMessagingTimeout(window, 0.35)
         // Full-screen windows have their own desktop and can't be resized.
-        if (attribute(window, "AXFullScreen") as? Bool) == true { return }
-        // Leave games alone, and anything that isn't an ordinary window (like a game's full-screen layer).
-        var pid: pid_t = 0
-        if AXUIElementGetPid(window, &pid) == .success, Games.isGame(pid) { return }
+        if (Self.attribute(window, "AXFullScreen") as? Bool) == true { return }
+        // Leave anything that isn't an ordinary window alone (like a game's full-screen layer); games
+        // themselves were left out before getting here.
         if let id = AppWindowList.windowID(of: window), let layer = AppWindowList.layer(of: id), layer != 0 { return }
-        if (attribute(window, kAXMinimizedAttribute) as? Bool) == true { return }
-        guard let origin = point(window, kAXPositionAttribute), let size = size(window, kAXSizeAttribute) else { return }
+        if (Self.attribute(window, kAXMinimizedAttribute) as? Bool) == true { return }
+        guard let origin = Self.point(window, kAXPositionAttribute), let size = Self.size(window, kAXSizeAttribute) else { return }
         let original = CGRect(origin: origin, size: size)
         var frame = original
 
@@ -314,18 +331,18 @@ final class DockSpaceKeeper {
             }
         }
         // Shrink first, then move, so the window never has to reach past the screen on the way.
-        if frame.size != original.size { setSize(window, frame.size) }
-        if frame.origin != original.origin { setPosition(window, frame.origin) }
+        if frame.size != original.size { Self.setSize(window, frame.size) }
+        if frame.origin != original.origin { Self.setPosition(window, frame.origin) }
     }
 
-    private func setSize(_ window: AXUIElement, _ size: CGSize) {
+    nonisolated private static func setSize(_ window: AXUIElement, _ size: CGSize) {
         var size = size
         if let value = AXValueCreate(.cgSize, &size) {
             AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
         }
     }
 
-    private func setPosition(_ window: AXUIElement, _ point: CGPoint) {
+    nonisolated private static func setPosition(_ window: AXUIElement, _ point: CGPoint) {
         var point = point
         if let value = AXValueCreate(.cgPoint, &point) {
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
@@ -334,27 +351,27 @@ final class DockSpaceKeeper {
 
     // MARK: Accessibility helpers
 
-    private func windows(of app: AXUIElement) -> [AXUIElement] {
-        (attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+    nonisolated private static func windows(of app: AXUIElement) -> [AXUIElement] {
+        (Self.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
     }
 
-    private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    nonisolated private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
     }
 
-    private func role(of element: AXUIElement) -> String? {
-        attribute(element, kAXRoleAttribute) as? String
+    nonisolated private static func role(of element: AXUIElement) -> String? {
+        Self.attribute(element, kAXRoleAttribute) as? String
     }
 
-    private func point(_ element: AXUIElement, _ name: String) -> CGPoint? {
-        guard let value = attribute(element, name), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    nonisolated private static func point(_ element: AXUIElement, _ name: String) -> CGPoint? {
+        guard let value = Self.attribute(element, name), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
         return AXValueGetValue(value as! AXValue, .cgPoint, &point) ? point : nil
     }
 
-    private func size(_ element: AXUIElement, _ name: String) -> CGSize? {
-        guard let value = attribute(element, name), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    nonisolated private static func size(_ element: AXUIElement, _ name: String) -> CGSize? {
+        guard let value = Self.attribute(element, name), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
         var size = CGSize.zero
         return AXValueGetValue(value as! AXValue, .cgSize, &size) ? size : nil
     }

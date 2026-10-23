@@ -499,15 +499,17 @@ struct SettingsView: View {
                 .tag(SettingsTab.general)
         }
         .frame(width: 620, height: 600)
+        // These change what's shown, so they wait until the window has finished drawing: changing
+        // it while SwiftUI is in the middle of drawing it can go wrong.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            store.refreshStatus()
+            DispatchQueue.main.async { store.refreshStatus() }
         }
         .onReceive(NotificationCenter.default.publisher(for: WallpaperPalette.didChange)) { _ in
-            store.refreshStatus()
+            DispatchQueue.main.async { store.refreshStatus() }
         }
         // The top bar's own menus change its settings too; show those changes here.
         .onReceive(NotificationCenter.default.publisher(for: BarSettings.didChange)) { _ in
-            store.reloadBar()
+            DispatchQueue.main.async { store.reloadBar() }
         }
     }
 }
@@ -875,7 +877,7 @@ private struct DesktopsTab: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { store.loadDesktops() }
+        .onAppear { DispatchQueue.main.async { store.loadDesktops() } }
     }
 }
 

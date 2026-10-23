@@ -485,8 +485,23 @@ final class DockController {
             model.setBadges(all)
             return
         }
-        model.setBadges(BadgeReader.read())
+        // Reading them asks the Dock, which can take a while: away from the main thread, so the
+        // dock's own animations never wait on it.
+        guard !readingBadges else { return }
+        readingBadges = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let badges = BadgeReader.read()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.readingBadges = false
+                    if self.badgeTimer != nil { self.model.setBadges(badges) }
+                }
+            }
+        }
     }
+
+    private var readingBadges = false
 
     // MARK: Edge triggers
 

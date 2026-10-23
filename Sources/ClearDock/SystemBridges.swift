@@ -14,14 +14,15 @@ enum BadgeReader {
         _ = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
     }
 
-    /// Notification counts keyed by app bundle path. Empty without permission.
-    static func read() -> [String: String] {
+    /// Notification counts keyed by app bundle path. Empty without permission. Asks the Dock
+    /// through Accessibility, so it's called away from the main thread.
+    nonisolated static func read() -> [String: String] {
         let started = CACurrentMediaTime()
         defer {
             let ms = Int((CACurrentMediaTime() - started) * 1000)
             if ms > 30 { previewLog.notice("Timing: reading badges took \(ms) ms") }
         }
-        guard hasPermission,
+        guard AXIsProcessTrusted(),
               let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
         else { return [:] }
         let dockElement = AXUIElementCreateApplication(dock.processIdentifier)
@@ -38,19 +39,19 @@ enum BadgeReader {
         return result
     }
 
-    private static func children(of element: AXUIElement) -> [AXUIElement] {
+    nonisolated private static func children(of element: AXUIElement) -> [AXUIElement] {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
         return value as? [AXUIElement] ?? []
     }
 
-    private static func string(_ element: AXUIElement, _ attribute: String) -> String? {
+    nonisolated private static func string(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
         return value as? String
     }
 
-    private static func url(_ element: AXUIElement) -> URL? {
+    nonisolated private static func url(_ element: AXUIElement) -> URL? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value) == .success else { return nil }
         return (value as? URL)?.standardizedFileURL
