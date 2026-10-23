@@ -100,7 +100,7 @@ final class DockController {
         view.scale = NSScreen.screens.first?.backingScaleFactor ?? 2
         container = DockContainerView(dock: view)
         panel.contentView = container
-        container.background.apply()
+        applyBackground()
         view.onEnter = { [weak self] in self?.cancelHide() }
         view.onExit = { [weak self] in self?.scheduleHide() }
         view.onHover = { [weak self] index in self?.hoverChanged(index) }
@@ -126,7 +126,7 @@ final class DockController {
         // Redraw when the wallpaper's colours change (only checked when a setting uses them).
         NotificationCenter.default.addObserver(forName: WallpaperPalette.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.container.background.apply()
+                self?.applyBackground()
                 self?.view.update(animated: false)
             }
         }
@@ -153,10 +153,30 @@ final class DockController {
             MainActor.assumeIsolated { self?.checkLockIn() }
         }
 
+        // When matching the top bar, its look changing (its settings, the wallpaper, the desktop's
+        // colour) changes the dock's too.
+        NotificationCenter.default.addObserver(forName: BarLookShare.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, Appearance.matchesBar else { return }
+                let hadBackground = self.model.layout.hasBackground
+                self.applyBackground()
+                // A background needs a little room round the icons; without one, they sit closer.
+                if Appearance.hasBackground != hadBackground { self.model.reload() } else { self.view.update(animated: false) }
+            }
+        }
+
         model.reload()
         applyMode()
         refreshWallpaperColors()
         view.applyPreviewHover()
+    }
+
+    /// Draws the background, in the dock's own look or, when matching, the top bar's.
+    private func applyBackground() {
+        let look = Appearance.matchesBar ? BarLookShare.look(for: currentScreen) : nil
+        container.background.barLook = look
+        DockView.barAccent = look?.accent
+        container.background.apply()
     }
 
     private func checkLockIn() {
@@ -182,7 +202,7 @@ final class DockController {
     func settingsChanged() {
         if let screen, !NSScreen.screens.contains(screen) { self.screen = nil }
         Appearance.reload()
-        container.background.apply()
+        applyBackground()
         refreshWallpaperColors(unlessRecent: true)
         model.reload()
         applyMode()

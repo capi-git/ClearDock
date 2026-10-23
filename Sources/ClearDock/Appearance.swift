@@ -288,7 +288,17 @@ enum Appearance {
         set { defaults.set(newValue, forKey: "look.theme") }
     }
 
-    static var hasBackground: Bool { background != .none }
+    /// The dock takes on the top bar's look (its glass or colour, rounding and highlight), so the
+    /// two match. Only while the bar is on; otherwise the dock keeps its own look.
+    static var matchesBar: Bool {
+        get { defaults.bool(forKey: "look.matchesBar") }
+        set { defaults.set(newValue, forKey: "look.matchesBar") }
+    }
+
+    @MainActor static var hasBackground: Bool {
+        if matchesBar, let look = BarLookShare.looks.values.first { return look.style != .none }
+        return background != .none
+    }
 
     /// Whether anything uses colours taken from the wallpaper.
     static var usesWallpaper: Bool {

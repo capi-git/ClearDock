@@ -4,7 +4,14 @@ import AppKit
 /// with an optional bevel or gloss. With no background, nothing extra is drawn at all.
 @MainActor
 final class DockBackgroundView: NSView {
+    /// The top bar's look, when the dock matches it.
+    var barLook: BarLook?
     private var glass: NSGlassEffectView?
+    /// The frosted blur behind a tinted bar look, as the bar's own pieces have.
+    private var blur: NSVisualEffectView?
+    /// The rounding, as a share of the dock's depth, when it follows the bar (whose pieces are
+    /// rounded by their height).
+    private var roundingShare: CGFloat?
     private let plain = NSView()
     /// The shine across the top half, for the gloss finish.
     private let shine = CAGradientLayer()
@@ -42,10 +49,21 @@ final class DockBackgroundView: NSView {
 
     override func layout() {
         super.layout()
+        if let roundingShare {
+            let depth = min(bounds.width, bounds.height)
+            let radius = min(depth / 2, (depth * roundingShare).rounded())
+            glass?.cornerRadius = radius
+            blur?.layer?.cornerRadius = radius
+            plain.layer?.cornerRadius = radius
+        }
         layoutFinish()
     }
 
     func apply() {
+        if let barLook { return applyBar(barLook) }
+        roundingShare = nil
+        blur?.removeFromSuperview()
+        blur = nil
         let style = Appearance.background
         let radius = CGFloat(Appearance.cornerRadius)
         isHidden = style == .none
@@ -100,6 +118,55 @@ final class DockBackgroundView: NSView {
         shade.strokeColor = NSColor(white: 0, alpha: 0.35).cgColor
         layoutFinish()
         CATransaction.commit()
+    }
+
+    /// Looks like one of the top bar's pieces: its glass, or its frosted tint and outline.
+    private func applyBar(_ look: BarLook) {
+        isHidden = look.style == .none
+        roundingShare = look.cornerRadius / max(look.size.pillHeight, 1)
+        shine.isHidden = true
+        highlight.isHidden = true
+        shade.isHidden = true
+        fill.isHidden = true
+        if look.style == .glass {
+            plain.isHidden = true
+            blur?.removeFromSuperview()
+            blur = nil
+            if glass == nil {
+                let view = NSGlassEffectView(frame: bounds)
+                view.autoresizingMask = [.width, .height]
+                addSubview(view, positioned: .below, relativeTo: nil)
+                glass = view
+            }
+            glass?.tintColor = look.glassTint?.withAlphaComponent(0.35)
+        } else if look.style != .none {
+            glass?.removeFromSuperview()
+            glass = nil
+            if blur == nil {
+                let view = NSVisualEffectView(frame: bounds)
+                view.material = .hudWindow
+                view.blendingMode = .behindWindow
+                view.state = .active
+                view.wantsLayer = true
+                view.layer?.cornerCurve = .continuous
+                view.layer?.masksToBounds = true
+                view.autoresizingMask = [.width, .height]
+                addSubview(view, positioned: .below, relativeTo: nil)
+                blur = view
+            }
+            plain.isHidden = false
+            if let layer = plain.layer {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                layer.backgroundColor = look.fill.withAlphaComponent(CGFloat(look.opacity)).cgColor
+                layer.cornerCurve = .continuous
+                layer.masksToBounds = true
+                layer.borderWidth = 1
+                layer.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
+                CATransaction.commit()
+            }
+        }
+        needsLayout = true
     }
 
     private func layoutFinish() {

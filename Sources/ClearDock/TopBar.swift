@@ -48,6 +48,25 @@ struct BarLook: Equatable {
     }
 }
 
+/// The top bar's look on each screen, as it is right now (with the desktop's colour), shared with the
+/// dock so the two can match. Empty while the bar is off.
+@MainActor
+enum BarLookShare {
+    private(set) static var looks: [CGDirectDisplayID: BarLook] = [:]
+    static let didChange = Notification.Name("ClearDockBarLookChanged")
+
+    static func publish(_ new: [CGDirectDisplayID: BarLook]) {
+        guard new != looks else { return }
+        looks = new
+        NotificationCenter.default.post(name: didChange, object: nil)
+    }
+
+    /// The look of the bar on a screen, or else of any bar.
+    static func look(for screen: NSScreen?) -> BarLook? {
+        screen?.displayID.flatMap { looks[$0] } ?? looks.values.first
+    }
+}
+
 /// Where a screen's bar puts things: its width, and the room left in the middle for the camera
 /// notch or another app's island (like Vorssaint's).
 struct BarLayout: Equatable {
@@ -449,6 +468,7 @@ final class TopBarController {
         for (_, entry) in panels { entry.panel.orderOut(nil) }
         panels.removeAll()
         DockSpaceKeeper.shared.reserveTop([])
+        BarLookShare.publish([:])
         MemoryRelief.soon()
     }
 
@@ -855,6 +875,8 @@ final class TopBarController {
         if desktops != model.desktops {
             let sharedBefore = model.desktops.keys.contains("Main")
             model.desktops = desktops
+            // The desktop showing may have its own colour.
+            shareLook()
             if desktops.keys.contains("Main") != sharedBefore { layout() }
         }
     }
@@ -956,6 +978,18 @@ final class TopBarController {
         look.albumColours = BarSettings.albumColours
         look.miniPlayer = BarSettings.miniPlayer
         if model.look != look { model.look = look }
+        shareLook()
+    }
+
+    /// Tells the dock how each screen's bar looks now, so it can match.
+    private func shareLook() {
+        let shared = model.desktops.keys.contains("Main")
+        var looks: [CGDirectDisplayID: BarLook] = [:]
+        for screen in NSScreen.screens {
+            guard let id = screen.displayID else { continue }
+            looks[id] = model.look(for: shared ? "Main" : (screen.displayUUID ?? "Main"))
+        }
+        BarLookShare.publish(looks)
     }
 
     /// A calm colour and the strongest colour of an album cover.

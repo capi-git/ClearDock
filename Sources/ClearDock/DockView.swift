@@ -375,9 +375,13 @@ final class DockView: NSView {
         return image
     }
 
+    /// The top bar's highlight colour, while the dock matches the bar.
+    static var barAccent: NSColor?
+
     /// The colour of the marks beside open apps, and of the divider lines.
     private static func markerColor() -> NSColor {
-        switch Appearance.markerColor {
+        if let barAccent { return barAccent }
+        return switch Appearance.markerColor {
         case .white: .white
         case .black: .black
         case .wallpaper: WallpaperPalette.shared.accent

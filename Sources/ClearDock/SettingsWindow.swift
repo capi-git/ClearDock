@@ -80,6 +80,7 @@ final class SettingsStore: ObservableObject {
     // Dock look
     @Published var theme: String?
     @Published var themes: [DockTheme] = []
+    @Published var matchesBar = false { didSet { edit { Appearance.matchesBar = matchesBar } } }
     @Published var background = DockBackground.none { didSet { edit { Appearance.background = background } } }
     @Published var backgroundColor = Color.black { didSet { edit { Appearance.backgroundColor = NSColor(backgroundColor) } } }
     @Published var backgroundOpacity = 0.5 { didSet { edit { Appearance.backgroundOpacity = backgroundOpacity } } }
@@ -273,6 +274,7 @@ final class SettingsStore: ObservableObject {
         Appearance.reload()
         theme = Appearance.theme
         themes = DockTheme.all
+        matchesBar = Appearance.matchesBar
         background = Appearance.background
         backgroundColor = Color(nsColor: Appearance.backgroundColor)
         backgroundOpacity = Appearance.backgroundOpacity
@@ -352,6 +354,8 @@ final class SettingsStore: ObservableObject {
     }
 
     func apply(_ theme: DockTheme) {
+        // A theme is a look of the dock's own.
+        Appearance.matchesBar = false
         theme.apply()
         reload()
         changed(.dock)
@@ -588,41 +592,13 @@ private struct LookTab: View {
             }
 
             Section("Background") {
-                Picker("Behind the icons", selection: $store.background) {
-                    ForEach(DockBackground.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                if store.background == .color {
-                    ColorPicker("Colour", selection: $store.backgroundColor, supportsOpacity: false)
-                    Toggle("Fade into a second colour", isOn: $store.useGradient)
-                    if store.useGradient {
-                        ColorPicker("Second colour", selection: $store.gradientColor, supportsOpacity: false)
-                    }
-                }
-                if store.background == .wallpaper {
-                    LabeledContent("Colours from your wallpaper") {
-                        HStack(spacing: 6) {
-                            Swatch(color: store.wallpaperBase)
-                            Swatch(color: store.wallpaperAccent)
-                        }
-                    }
-                }
-                if store.background == .color || store.background == .wallpaper {
-                    Slider(value: $store.backgroundOpacity, in: 0.15...1) { Text("Strength") }
-                    Picker("Finish", selection: $store.finish) {
-                        ForEach(BarFinish.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    Picker("Outline", selection: $store.outline) {
-                        ForEach(OutlineChoice.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    if store.outline == .colour {
-                        ColorPicker("Outline colour", selection: $store.outlineColor, supportsOpacity: false)
-                    }
-                }
-                if store.background != .none {
-                    Slider(value: $store.cornerRadius, in: 0...30) { Text("Corner rounding") }
+                Toggle("Match the top bar", isOn: $store.matchesBar)
+                if store.matchesBar {
+                    Note(store.barEnabled
+                         ? "The dock takes the top bar's glass or colour, rounding and highlight, and changes with it, desktop by desktop."
+                         : "The dock takes the top bar's look while the top bar is on.")
+                } else {
+                    backgroundChoices
                 }
             }
 
@@ -631,7 +607,7 @@ private struct LookTab: View {
                     ForEach(MarkerStyle.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                if store.markerStyle != .none {
+                if store.markerStyle != .none && !store.matchesBar {
                     Picker("Colour", selection: $store.markerColor) {
                         ForEach(MarkerColor.allCases) { Text($0.title).tag($0) }
                     }
@@ -667,6 +643,46 @@ private struct LookTab: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("It saves the current background, icon style, shape and marks.")
+        }
+    }
+
+    /// The dock's own background, when it isn't matching the top bar.
+    @ViewBuilder private var backgroundChoices: some View {
+        Picker("Behind the icons", selection: $store.background) {
+            ForEach(DockBackground.allCases) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        if store.background == .color {
+            ColorPicker("Colour", selection: $store.backgroundColor, supportsOpacity: false)
+            Toggle("Fade into a second colour", isOn: $store.useGradient)
+            if store.useGradient {
+                ColorPicker("Second colour", selection: $store.gradientColor, supportsOpacity: false)
+            }
+        }
+        if store.background == .wallpaper {
+            LabeledContent("Colours from your wallpaper") {
+                HStack(spacing: 6) {
+                    Swatch(color: store.wallpaperBase)
+                    Swatch(color: store.wallpaperAccent)
+                }
+            }
+        }
+        if store.background == .color || store.background == .wallpaper {
+            Slider(value: $store.backgroundOpacity, in: 0.15...1) { Text("Strength") }
+            Picker("Finish", selection: $store.finish) {
+                ForEach(BarFinish.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            Picker("Outline", selection: $store.outline) {
+                ForEach(OutlineChoice.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            if store.outline == .colour {
+                ColorPicker("Outline colour", selection: $store.outlineColor, supportsOpacity: false)
+            }
+        }
+        if store.background != .none {
+            Slider(value: $store.cornerRadius, in: 0...30) { Text("Corner rounding") }
         }
     }
 }
