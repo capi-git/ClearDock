@@ -346,6 +346,8 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
         // asking every app (some of them busy) would take a long while.
         let strips = strips
         guard !strips.isEmpty else { return }
+        // Never under a window you're dragging or resizing: once the button is up.
+        if Self.mouseButtonDown { return perform(after: 0.3) { self.fitAllWindows() } }
         let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         var reaching = Set<pid_t>()
         for info in onScreen where (info[kCGWindowLayer as String] as? Int) == 0 {
