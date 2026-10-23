@@ -194,8 +194,12 @@ final class DockController {
         WallpaperPalette.shared.refresh(for: NSScreen.screens.first, unlessRecent: unlessRecent)
     }
 
+    /// Whether the dock's screen is showing a full-screen app, as macOS records it for each screen:
+    /// asking the app in front instead could wait on it while it's busy, and say nothing about
+    /// which screen it's on.
     private func checkFullScreen() {
-        let now = FullScreenCheck.frontAppIsFullScreen()
+        let displays = DesktopReader.fullScreenDisplays()
+        let now = displays.contains("Main") || (currentScreen?.displayUUID).map(displays.contains) == true
         guard now != fullScreenFront else { return }
         fullScreenFront = now
         applyMode()

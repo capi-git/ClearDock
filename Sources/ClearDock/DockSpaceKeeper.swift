@@ -376,20 +376,3 @@ final class DockSpaceKeeper {
         return AXValueGetValue(value as! AXValue, .cgSize, &size) ? size : nil
     }
 }
-
-/// Whether the app in front is showing a window in true full screen (its own desktop).
-@MainActor
-enum FullScreenCheck {
-    static func frontAppIsFullScreen() -> Bool {
-        guard AXIsProcessTrusted(), let front = NSWorkspace.shared.frontmostApplication,
-              front.processIdentifier != getpid() else { return false }
-        let app = AXUIElementCreateApplication(front.processIdentifier)
-        AXUIElementSetMessagingTimeout(app, 0.25)
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused) == .success,
-              let window = focused, CFGetTypeID(window) == AXUIElementGetTypeID() else { return false }
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window as! AXUIElement, "AXFullScreen" as CFString, &value) == .success else { return false }
-        return (value as? Bool) == true
-    }
-}
