@@ -29,7 +29,8 @@ final class DockSpaceKeeper {
     private var strips: [Strip] { slots.values.flatMap { $0 }.sorted { $0.edge == .top && $1.edge != .top } }
 
     private var observers: [pid_t: AXObserver] = [:]
-    private var watchedWindows = Set<CFHashCode>()
+    /// Windows listened to directly, with their app, so they're forgotten when it quits.
+    private var watchedWindows: [CFHashCode: pid_t] = [:]
     /// Windows that moved or changed size while a mouse button was down, looked at once it's up.
     private var draggedElements: [CFHashCode: AXUIElement] = [:]
     private var dragCheck: DispatchWorkItem?
@@ -154,19 +155,20 @@ final class DockSpaceKeeper {
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = observer
-        for window in windows(of: app) { watchWindow(window, observer: observer) }
+        for window in windows(of: app) { watchWindow(window, of: pid, observer: observer) }
     }
 
     private func unwatch(_ pid: pid_t) {
+        watchedWindows = watchedWindows.filter { $0.value != pid }
         guard let observer = observers.removeValue(forKey: pid) else { return }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
     /// Some apps only report moves and resizes on the window itself, so listen there too.
-    private func watchWindow(_ window: AXUIElement, observer: AXObserver) {
+    private func watchWindow(_ window: AXUIElement, of pid: pid_t, observer: AXObserver) {
         let key = CFHash(window)
-        guard !watchedWindows.contains(key) else { return }
-        watchedWindows.insert(key)
+        guard watchedWindows[key] == nil else { return }
+        watchedWindows[key] = pid
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         for name in Self.windowNotifications {
             AXObserverAddNotification(observer, window, name as CFString, refcon)
@@ -192,7 +194,7 @@ final class DockSpaceKeeper {
         }
         var pid: pid_t = 0
         if AXUIElementGetPid(window, &pid) == .success, let observer = observers[pid] {
-            watchWindow(window, observer: observer)
+            watchWindow(window, of: pid, observer: observer)
         }
         scheduleFit(window)
     }
@@ -234,10 +236,32 @@ final class DockSpaceKeeper {
     }
 
     private func fitAllWindows() {
-        for pid in observers.keys {
+        // Only apps with a window reaching into one of the strips are asked about their windows:
+        // asking every app (some of them busy) would hold everything up.
+        let strips = strips
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var reaching = Set<pid_t>()
+        for info in onScreen where (info[kCGWindowLayer as String] as? Int) == 0 {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, observers[pid] != nil,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { continue }
+            if strips.contains(where: { Self.reaches(frame, into: $0) }) { reaching.insert(pid) }
+        }
+        for pid in reaching {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.35)
             for window in windows(of: app) { fit(window) }
+        }
+    }
+
+    /// Whether a window (in the system's window coordinates) reaches into a strip on its screen.
+    private static func reaches(_ frame: CGRect, into strip: Strip) -> Bool {
+        guard frame.intersects(strip.screen) else { return false }
+        switch strip.edge {
+        case .top: return frame.minY < strip.line - 1
+        case .bottom: return frame.maxY > strip.line + 1
+        case .left: return frame.minX < strip.line - 1
+        case .right: return frame.maxX > strip.line + 1
         }
     }
 

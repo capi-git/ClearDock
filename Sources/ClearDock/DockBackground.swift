@@ -77,6 +77,8 @@ final class DockBackgroundView: NSView {
                 glass = view
             }
             glass?.cornerRadius = radius
+            // It may have been tinted for matching the top bar.
+            glass?.tintColor = nil
             return
         }
 
@@ -124,6 +126,14 @@ final class DockBackgroundView: NSView {
     private func applyBar(_ look: BarLook) {
         isHidden = look.style == .none
         roundingShare = look.cornerRadius / max(look.size.pillHeight, 1)
+        if look.style == .none {
+            // Nothing to draw: let go of the glass or blur, which keep working while they exist.
+            glass?.removeFromSuperview()
+            glass = nil
+            blur?.removeFromSuperview()
+            blur = nil
+            return
+        }
         shine.isHidden = true
         highlight.isHidden = true
         shade.isHidden = true

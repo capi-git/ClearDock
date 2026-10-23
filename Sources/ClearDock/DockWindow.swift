@@ -189,7 +189,9 @@ final class DockController {
 
     private func refreshWallpaperColors(unlessRecent: Bool = false) {
         guard Appearance.usesWallpaper else { return }
-        WallpaperPalette.shared.refresh(for: currentScreen, unlessRecent: unlessRecent)
+        // There's one set of wallpaper colours, shared with the top bar: always from the main
+        // screen, so the two never pull it between screens with different wallpapers.
+        WallpaperPalette.shared.refresh(for: NSScreen.screens.first, unlessRecent: unlessRecent)
     }
 
     private func checkFullScreen() {
@@ -339,8 +341,11 @@ final class DockController {
         guard let screen else { return }
         cancelHide()
         if !shown || self.screen != screen {
+            let movedScreen = self.screen != screen
             self.screen = screen
             view.scale = screen.backingScaleFactor
+            // Matching the bar: the bar on this screen (it may have its own desktop's colour).
+            if movedScreen && Appearance.matchesBar { applyBackground() }
             panel.setFrame(frame(on: screen, visible: false), display: false)
             panel.alphaValue = 0
         }

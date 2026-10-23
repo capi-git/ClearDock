@@ -39,7 +39,8 @@ final class WallpaperPalette {
             // A live wallpaper (from an app like Wallspace) looks a little different each time it's
             // looked at; only a real change of wallpaper should change the colours.
             if Self.near(colors.base, self.base) && Self.near(colors.top, self.top)
-                && Self.near(colors.accents.first ?? Self.fallbackAccent, self.accent) { return }
+                && colors.accents.count == self.accents.count
+                && zip(colors.accents, self.accents).allSatisfy({ Self.near($0, $1) }) { return }
             self.base = colors.base
             self.top = colors.top
             self.accents = colors.accents

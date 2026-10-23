@@ -409,7 +409,7 @@ final class DockModel {
         menu.autoenablesItems = false
 
         if item.kind == .trash {
-            menu.addItem(ActionMenuItem("Open") { [weak self] in self?.activate(index) })
+            menu.addItem(ActionMenuItem("Open") { NSWorkspace.shared.open(Self.trashURL) })
             let empty = ActionMenuItem("Empty Trash") { Self.confirmAndEmptyTrash() }
             empty.isEnabled = isTrashFull
             menu.addItem(empty)
@@ -418,13 +418,17 @@ final class DockModel {
         guard item.kind == .app else { return nil }
 
         let app = runningApp(for: item)
+        // The row can change while the menu is open (apps opening or quitting): find the app again
+        // when an action is chosen, rather than going by where it was.
+        let id = item.id
+        let now = { [weak self] () -> Int? in self?.items.firstIndex { $0.id == id } }
         if let app {
-            menu.addItem(ActionMenuItem("Show All Windows") { [weak self] in self?.showWindows(index) })
+            menu.addItem(ActionMenuItem("Show All Windows") { [weak self] in if let i = now() { self?.showWindows(i) } })
             menu.addItem(ActionMenuItem(app.isHidden ? "Show" : "Hide") {
                 if app.isHidden { app.unhide() } else { app.hide() }
             })
         } else {
-            menu.addItem(ActionMenuItem("Open") { [weak self] in self?.activate(index) })
+            menu.addItem(ActionMenuItem("Open") { [weak self] in if let i = now() { self?.activate(i) } })
         }
         if let url = item.url {
             menu.addItem(ActionMenuItem("Show in Finder") {

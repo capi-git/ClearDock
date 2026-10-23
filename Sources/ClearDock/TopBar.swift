@@ -1008,8 +1008,8 @@ final class TopBarController {
     /// across where it was doesn't open anything.
     private func barUnderPointer() -> (screen: NSScreen, bottom: CGFloat)? {
         let mouse = NSEvent.mouseLocation
-        guard revealTimer == nil, let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
-              let id = screen.displayID, let panel = panels[id]?.panel, panel.isVisible, panel.alphaValue > 0.5,
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
+              let id = screen.displayID, revealScreen != id, let panel = panels[id]?.panel, panel.isVisible, panel.alphaValue > 0.5,
               !exposeScreens.contains(id), !coveredScreens.contains(id) else { return nil }
         return (screen, panel.frame.minY)
     }

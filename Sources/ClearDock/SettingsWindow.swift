@@ -35,11 +35,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
         if let tab { store?.tab = tab }
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
+        // In front even if macOS doesn't make Clear Dock the active app straight away.
+        window?.orderFrontRegardless()
+        NSApp.activate()
+        // Becoming a normal app (with a Dock icon and a menu bar) takes effect a moment later, and
+        // macOS may only let it come forward then: ask again once it has.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let window = self?.window else { return }
+                NSApp.activate()
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
+        // A change made just before closing still reaches the dock or the bar.
+        store?.applyPending()
         window?.delegate = nil
         window = nil
         store = nil
@@ -422,6 +435,16 @@ final class SettingsStore: ObservableObject {
         guard !loading else { return }
         save()
         schedule(.bar)
+    }
+
+    /// Passes on changes still waiting to be passed on, straight away.
+    func applyPending() {
+        guard let pending else { return }
+        pending.cancel()
+        self.pending = nil
+        let areas = pendingAreas
+        pendingAreas.removeAll()
+        areas.forEach(changed)
     }
 
     private func schedule(_ area: SettingsArea) {
@@ -870,6 +893,10 @@ private struct DesktopNameField: View {
             .textFieldStyle(.roundedBorder)
             .focused($focused)
             .onAppear { text = name }
+            // Renamed from the bar meanwhile: show it, unless you're typing here.
+            .onChange(of: name) { _, renamed in
+                if !focused { text = renamed }
+            }
             .onSubmit { save(text) }
             .onChange(of: focused) { _, isFocused in
                 if !isFocused { save(text) }
