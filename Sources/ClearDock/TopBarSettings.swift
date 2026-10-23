@@ -352,19 +352,59 @@ enum SystemMenuBar {
     /// Whether Clear Dock has hidden the menu bar (and has the earlier setting saved).
     static var isHiddenByClearDock: Bool { UserDefaults.standard.object(forKey: savedKey) != nil }
 
-    /// Returns false if macOS didn't allow it.
-    @discardableResult
-    static func hide() -> Bool {
-        let defaults = UserDefaults.standard
-        if defaults.object(forKey: savedKey) == nil {
-            guard let current = run("get autohide menu bar of dock preferences") else { return false }
-            defaults.set(current.booleanValue, forKey: savedKey)
+    private static var hiding = false
+
+    /// Hides it, away from the main thread: the first time, macOS asks you to allow Clear Dock to
+    /// control System Events, and nothing should wait on that. `done` says whether it worked.
+    static func hide(then done: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        guard !hiding else { return }
+        hiding = true
+        let saved = UserDefaults.standard.object(forKey: savedKey) as? Bool
+        DispatchQueue.global(qos: .userInitiated).async {
+            var before = saved
+            var refusedNow = false
+            var hidden = false
+            if before == nil {
+                let answer = systemEvents("get autohide menu bar of dock preferences")
+                refusedNow = answer.refused
+                before = answer.output.map { $0 == "true" }
+            }
+            if before != nil {
+                let answer = systemEvents("set autohide menu bar of dock preferences to true")
+                refusedNow = answer.refused
+                hidden = answer.output != nil
+            }
+            let result = (before: before, hidden: hidden, refused: refusedNow)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    hiding = false
+                    refused = result.refused
+                    // Saved only once it's hidden: having it saved is what says Clear Dock hid it.
+                    if result.hidden, let before = result.before { UserDefaults.standard.set(before, forKey: savedKey) }
+                    done(result.hidden)
+                }
+            }
         }
-        guard run("set autohide menu bar of dock preferences to true") != nil else {
-            defaults.removeObject(forKey: savedKey)
-            return false
-        }
-        return true
+    }
+
+    /// Asks System Events through `osascript`, which can run off the main thread; nil if it failed,
+    /// and whether that was macOS not allowing it.
+    nonisolated private static func systemEvents(_ command: String) -> (output: String?, refused: Bool) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "tell application \"System Events\" to \(command)"]
+        let output = Pipe(), errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+        do { try process.run() } catch { return (nil, false) }
+        process.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let problem = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        if process.terminationStatus == 0 { return (text, false) }
+        NSLog("Clear Dock: couldn't change the menu bar: \(problem)")
+        // -1743: not allowed to control System Events (Privacy & Security > Automation).
+        return (nil, problem.contains("-1743"))
     }
 
     static func restore() {

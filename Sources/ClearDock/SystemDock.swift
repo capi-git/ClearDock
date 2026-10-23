@@ -10,6 +10,9 @@ import Foundation
 enum SystemDock {
     private static let domain = "com.apple.dock" as CFString
     private static let savedKey = "savedSystemDockValues"
+    /// Changing the Dock's settings and restarting it runs here, one step after another, so it
+    /// never holds up Clear Dock.
+    private static let queue = DispatchQueue(label: "ClearDock.SystemDock")
     /// Saved in place of a value to mean "this setting wasn't set before".
     private static let notSet = ""
 
@@ -54,17 +57,23 @@ enum SystemDock {
         }
         defaults.set(saved, forKey: savedKey)
 
-        var changed = false
-        for o in overrides where !isApplied(o) {
-            run("/usr/bin/defaults", ["write", "com.apple.dock", o.key, o.type, o.value])
-            changed = true
+        let writes = overrides.filter { !isApplied($0) }.map { ["write", "com.apple.dock", $0.key, $0.type, $0.value] }
+        guard !writes.isEmpty else { return }
+        queue.async {
+            for arguments in writes { run("/usr/bin/defaults", arguments) }
+            restartDock()
         }
-        if changed { restartDock() }
     }
 
     static func restore() {
         let defaults = UserDefaults.standard
         guard let saved = defaults.dictionary(forKey: savedKey) else { return }
+        // Here, and waiting for a hide still under way: Clear Dock may be about to quit.
+        queue.sync { restore(saved) }
+        defaults.removeObject(forKey: savedKey)
+    }
+
+    private static func restore(_ saved: [String: Any]) {
         for o in overrides {
             if let text = saved[o.key] as? String, text != notSet {
                 run("/usr/bin/defaults", ["write", "com.apple.dock", o.key, o.type, text])
@@ -80,7 +89,6 @@ enum SystemDock {
                 run("/usr/bin/defaults", ["delete", "com.apple.dock", o.key])
             }
         }
-        defaults.removeObject(forKey: savedKey)
         restartDock()
     }
 

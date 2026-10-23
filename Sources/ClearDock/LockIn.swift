@@ -227,13 +227,20 @@ final class LockIn {
                 center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.spaceChanged() }
                 },
+                // A screen unplugged or changed: its desktops' lock-ins end, or fit the new size.
+                NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.screensChanged() }
+                },
                 center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
                     let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
                     MainActor.assumeIsolated { if let pid { self?.appQuit(pid) } }
                 },
             ]
         } else if !needed && !tokens.isEmpty {
-            tokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+            tokens.forEach {
+                NSWorkspace.shared.notificationCenter.removeObserver($0)
+                NotificationCenter.default.removeObserver($0)
+            }
             tokens.removeAll()
             newcomerTimer?.invalidate()
             newcomerTimer = nil
@@ -246,6 +253,17 @@ final class LockIn {
         for session in sessions.values {
             session.showing = current.contains(session.space)
             session.showDecorationsAgain()
+        }
+    }
+
+    private func screensChanged() {
+        for session in Array(sessions.values) {
+            if session.screen == nil {
+                // Its windows have moved to another screen, onto whatever desktop shows there.
+                end(session, now: true)
+            } else {
+                session.refit()
+            }
         }
     }
 

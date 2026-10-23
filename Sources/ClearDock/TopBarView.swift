@@ -99,9 +99,9 @@ private struct DesktopPills: View {
         case .separate:
             // A piece for each desktop, with the apps on it.
             HStack(spacing: 6) {
-                ForEach(Array(desktops.enumerated()), id: \.element.id) { index, desktop in
+                ForEach(desktops) { desktop in
                     Pill(look: look, highlighted: desktop.isCurrent, action: { DesktopSwitcher.go(to: desktop) }) {
-                        label(desktop, index: index)
+                        label(desktop)
                         apps(desktop)
                     }
                     .onHover { model.hoverDesktop($0 ? desktop : nil) }
@@ -112,9 +112,9 @@ private struct DesktopPills: View {
             // One piece with a part for each desktop; the current one is highlighted.
             Pill(look: look) {
                 HStack(spacing: 2) {
-                    ForEach(Array(desktops.enumerated()), id: \.element.id) { index, desktop in
+                    ForEach(desktops) { desktop in
                         Segment(look: look, highlighted: desktop.isCurrent, dimmed: desktop.apps.isEmpty && look.desktopStyle == .numbers) {
-                            if look.desktopStyle != .apps || desktop.apps.isEmpty { label(desktop, index: index) }
+                            if look.desktopStyle != .apps || desktop.apps.isEmpty { label(desktop) }
                             if look.desktopStyle != .numbers { apps(desktop, showEmpty: false) }
                         }
                         .onTapGesture { DesktopSwitcher.go(to: desktop) }
@@ -128,14 +128,10 @@ private struct DesktopPills: View {
         }
     }
 
-    private func number(_ desktop: Desktop, index: Int) -> Int {
-        desktop.number
-    }
-
-    @ViewBuilder private func label(_ desktop: Desktop, index: Int) -> some View {
+    @ViewBuilder private func label(_ desktop: Desktop) -> some View {
         // A desktop with its own colour shows its number in that colour, until you're on it.
         let colour = desktop.isCurrent ? nil : model.desktopColours[desktop.key]
-        Text(model.desktopNames[desktop.key] ?? "\(number(desktop, index: index))")
+        Text(model.desktopNames[desktop.key] ?? "\(desktop.number)")
             .font(look.font(.bold))
             .foregroundStyle(colour.map { Color(nsColor: $0.color) } ?? (desktop.isCurrent ? look.onAccent : look.text))
     }

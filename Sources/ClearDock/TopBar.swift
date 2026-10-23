@@ -353,13 +353,20 @@ final class TopBarController {
         let wanted = BarSettings.enabled && BarSettings.replaceMenuBar
         if wanted {
             // Only once: other settings changes shouldn't ask System Events again.
-            guard !SystemMenuBar.isHiddenByClearDock, SystemMenuBar.hide() else { return }
+            guard !SystemMenuBar.isHiddenByClearDock else { return }
+            SystemMenuBar.hide { [weak self] hidden in
+                if hidden { self?.menuBarChanged() }
+            }
         } else {
             guard SystemMenuBar.isHiddenByClearDock else { return }
             SystemMenuBar.restore()
+            menuBarChanged()
         }
-        // Move the bar now, and again once the menu bar has finished sliding away or back,
-        // since windows and the notch area only settle then.
+    }
+
+    /// Moves the bar now, and again once the menu bar has finished sliding away or back, since
+    /// windows and the notch area only settle then.
+    private func menuBarChanged() {
         layout()
         for delay in [0.4, 1.2, 3] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
