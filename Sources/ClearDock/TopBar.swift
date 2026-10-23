@@ -146,6 +146,13 @@ final class TopBarModel {
         return base.tinted(art.accent, base: art.base)
     }
 
+    /// The look for one desktop on a screen's bar, showing or not: tinted with its colour, if it has one.
+    func look(for desktopsKey: String, desktop space: UInt64) -> BarLook {
+        guard let desktop = desktops[desktopsKey]?.first(where: { $0.id == space }),
+              let colour = desktopColours[desktop.key] else { return look }
+        return look.tinted(colour.color)
+    }
+
     /// The look for one screen's bar: tinted with its current desktop's colour, if it has one.
     func look(for desktopsKey: String) -> BarLook {
         guard let current = desktops[desktopsKey]?.first(where: \.isCurrent),
@@ -329,10 +336,12 @@ final class TopBarController {
             if self.model.lockInChoosing != self.lockIn.choosing { self.model.lockInChoosing = self.lockIn.choosing }
             if self.model.lockInStarting != self.lockIn.starting { self.model.lockInStarting = self.lockIn.starting }
         }
-        lockIn.accent = { [weak self] screen in
+        lockIn.accent = { [weak self] screen, space in
             guard let self else { return .systemPurple }
             let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
-            return self.model.look(for: key).accent
+            // By the locked-in desktop itself: which desktop is showing may not be read yet just
+            // after a switch.
+            return self.model.look(for: key, desktop: space).accent
         }
         lockIn.choose = { [weak self] choices, screen, done in
             guard let self else { return done(nil) }
@@ -379,6 +388,8 @@ final class TopBarController {
     /// Hides the macOS menu bar while the bar replaces it, and puts it back otherwise.
     private func applyMenuBarSetting() {
         let wanted = BarSettings.enabled && BarSettings.replaceMenuBar
+        // Still putting it back from a moment ago: once that's done, this runs again.
+        guard !SystemMenuBar.restoring else { return }
         if wanted {
             // Only once: other settings changes shouldn't ask System Events again.
             guard !SystemMenuBar.isHiddenByClearDock else { return }
@@ -387,7 +398,11 @@ final class TopBarController {
             }
         } else {
             guard SystemMenuBar.isHiddenByClearDock else { return }
-            SystemMenuBar.restore { [weak self] _ in self?.menuBarChanged() }
+            SystemMenuBar.restore { [weak self] _ in
+                self?.menuBarChanged()
+                // Turned back on meanwhile: hide it again.
+                self?.applyMenuBarSetting()
+            }
         }
     }
 
@@ -414,7 +429,7 @@ final class TopBarController {
 
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {
-            if $0.popover.showing?.hasPrefix("desktop-") == true { $0.popover.hide() }
+            if $0.popover.wanted?.hasPrefix("desktop-") == true { $0.popover.hide() }
             $0.refreshDesktops()
             $0.refreshWallpaperColors()
             $0.checkFullScreen()
@@ -435,13 +450,17 @@ final class TopBarController {
             observe(workspace, name) { $0.refreshDesktops(); $0.model.pruneIcons() }
         }
         observe(workspace, NSWorkspace.didWakeNotification) { $0.tick(); $0.refreshDesktops(); $0.layout() }
-        observe(.default, NSApplication.didChangeScreenParametersNotification) { $0.scheduleLayout(after: 0.1) }
+        observe(.default, NSApplication.didChangeScreenParametersNotification) {
+            BarSettings.forgetMenuBarHidden()
+            $0.scheduleScreenLayout()
+        }
         observe(.default, WallpaperPalette.didChange) { $0.applyLook(); $0.refreshBackdrops(after: 0.2) }
         observe(.default, .NSSystemTimeZoneDidChange) { $0.tick() }
         // A right-click menu opening closes any pop-up, so the two don't overlap.
         observe(.default, NSMenu.didBeginTrackingNotification) { $0.popover.hide() }
         // Turning "Automatically hide and show the menu bar" on or off moves the bar.
         observe(DistributedNotificationCenter.default(), Notification.Name("AppleInterfaceMenuBarHidingChangedNotification")) {
+            BarSettings.forgetMenuBarHidden()
             $0.scheduleLayout(after: 0.5)
         }
 
@@ -533,6 +552,19 @@ final class TopBarController {
         }
         pendingLayout = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private var pendingScreenLayout: DispatchWorkItem?
+
+    /// Screen changes come in bursts: one layout once they've stopped, without putting off a
+    /// layout already waiting for something else to settle.
+    private func scheduleScreenLayout() {
+        pendingScreenLayout?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.layout() }
+        }
+        pendingScreenLayout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
     }
 
     private func layout() {

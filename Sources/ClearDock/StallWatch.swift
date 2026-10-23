@@ -19,8 +19,8 @@ enum StallWatch {
     /// Whether the watcher is already watching this stretch of work.
     private static let armed = Atomic<Bool>(false)
     private static let wake = DispatchSemaphore(value: 0)
-    /// What the main thread was seen doing during the current stall.
-    private static let seen = Mutex<String?>(nil)
+    /// What the main thread was seen doing, and during which stretch of work.
+    private static let seen = Mutex<(started: UInt64, text: String)?>(nil)
     nonisolated(unsafe) private static var mainThread: thread_act_t = 0
 
     static func start() {
@@ -35,7 +35,7 @@ enum StallWatch {
         let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.allActivities.rawValue, true, 0) { _, activity in
             let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let started = workStarted.load(ordering: .relaxed)
-            if started != 0, now - started > threshold { report((now - started) / 1_000_000) }
+            if started != 0, now - started > threshold { report((now - started) / 1_000_000, started: started) }
             if activity == .beforeWaiting {
                 workStarted.store(0, ordering: .relaxed)
             } else {
@@ -52,10 +52,10 @@ enum StallWatch {
         watcher.start()
     }
 
-    private static func report(_ milliseconds: UInt64) {
+    private static func report(_ milliseconds: UInt64, started: UInt64) {
         let doing = seen.withLock { value -> String? in
             defer { value = nil }
-            return value
+            return value?.started == started ? value?.text : nil
         }
         timingLog.notice("Stall: busy \(milliseconds) ms; doing: \(doing ?? "not caught", privacy: .public)")
     }
@@ -81,7 +81,7 @@ enum StallWatch {
                 caught = started
                 let count = sampleMainThread(into: frames, capacity: capacity)
                 let text = describe(frames, count)
-                seen.withLock { $0 = text }
+                seen.withLock { $0 = (caught, text) }
             }
         }
     }

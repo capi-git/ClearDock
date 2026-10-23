@@ -99,6 +99,7 @@ final class DockController {
     /// done, so the slide isn't cut short by the window jumping to its new size.
     private var sliding = false
     private var changedWhileSliding = false
+    private var screensAsleep = false
     /// For checking badge drawing: launch with `-previewBadges 5` to put that count on every app.
     private let previewBadge = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)["previewBadges"] as? String
 
@@ -167,12 +168,16 @@ final class DockController {
 
         // Nothing to show while the displays sleep: no badge reading then.
         workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.stopBadgeUpdates() }
+            MainActor.assumeIsolated {
+                self?.screensAsleep = true
+                self?.stopBadgeUpdates()
+            }
         }
         workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.shown else { return }
-                self.startBadgeUpdates()
+                guard let self else { return }
+                self.screensAsleep = false
+                if self.shown { self.startBadgeUpdates() }
             }
         }
 
@@ -560,6 +565,7 @@ final class DockController {
     /// then every couple of seconds. A hidden dock never asks.
     private func startBadgeUpdates() {
         stopBadgeUpdates()
+        guard !screensAsleep else { return }
         guard Settings.showBadges, BadgeReader.hasPermission || previewBadge != nil else {
             model.setBadges([:])
             return

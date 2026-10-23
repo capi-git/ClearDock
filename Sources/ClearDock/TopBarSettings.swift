@@ -341,6 +341,9 @@ enum BarSettings {
     }
     @MainActor private static var menuBarHiddenKnown: (hidden: Bool, at: Date)?
 
+    /// The setting just changed (or the screens did): look it up afresh next time.
+    @MainActor static func forgetMenuBarHidden() { menuBarHiddenKnown = nil }
+
     @MainActor private static func lookUpMenuBarHidden() -> Bool {
         CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
         if (CFPreferencesCopyAppValue("_HIHideMenuBar" as CFString, kCFPreferencesAnyApplication) as? NSNumber)?.boolValue == true {
@@ -375,6 +378,8 @@ enum SystemMenuBar {
     static var isHiddenByClearDock: Bool { UserDefaults.standard.object(forKey: savedKey) != nil }
 
     private static var hiding = false
+    /// Putting it back, away from the main thread, right now.
+    private(set) static var restoring = false
 
     /// Hides it, away from the main thread: the first time, macOS asks you to allow Clear Dock to
     /// control System Events, and nothing should wait on that. `done` says whether it worked.
@@ -431,11 +436,14 @@ enum SystemMenuBar {
 
     /// Puts it back away from the main thread, like `hide`, then says whether it worked.
     static func restore(then done: @escaping @MainActor (Bool) -> Void) {
+        guard !restoring else { return }
         guard let saved = UserDefaults.standard.object(forKey: savedKey) as? Bool else { return done(true) }
+        restoring = true
         DispatchQueue.global(qos: .userInitiated).async {
             let answer = systemEvents("set autohide menu bar of dock preferences to \(saved)")
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    restoring = false
                     refused = answer.refused
                     if answer.output != nil { UserDefaults.standard.removeObject(forKey: savedKey) }
                     done(answer.output != nil)

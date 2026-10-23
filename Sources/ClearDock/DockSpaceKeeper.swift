@@ -165,6 +165,9 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
     /// The latest fit asked for each window; an earlier one still waiting is dropped.
     private var pending: [CFHashCode: Int] = [:]
     private var asked = 0
+    /// Goes up at each stop, so work asked for before it (watching an app a moment after it opened,
+    /// trying an app again) is dropped.
+    private var epoch = 0
 
     private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
                                            kAXWindowMovedNotification, kAXWindowResizedNotification]
@@ -204,12 +207,21 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
     // MARK: Asked from the main thread
 
     func use(_ strips: [KeptStrip]) { perform { self.strips = strips } }
-    func watch(_ pids: [pid_t], after delay: TimeInterval = 0) { perform(after: delay) { pids.forEach { self.watchApp($0) } } }
+    func watch(_ pids: [pid_t], after delay: TimeInterval = 0) {
+        perform {
+            let epoch = self.epoch
+            self.perform(after: delay) {
+                guard self.epoch == epoch else { return }
+                pids.forEach { self.watchApp($0) }
+            }
+        }
+    }
     func unwatch(_ pid: pid_t) { perform { self.unwatchApp(pid) } }
     func fitAll() { perform { self.fitAllWindows() } }
 
     func stopAll() {
         perform {
+            self.epoch += 1
             for pid in Array(self.observers.keys) { self.unwatchApp(pid) }
             self.watchedWindows.removeAll()
             self.dragged.removeAll()
@@ -237,7 +249,13 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
         }
         guard listening else {
             // Not answering yet (it may still be opening): try again in a moment.
-            if attempt < 3 { perform(after: 2) { self.watchApp(pid, attempt: attempt + 1) } }
+            let epoch = epoch
+            if attempt < 3 {
+                perform(after: 2) {
+                    guard self.epoch == epoch else { return }
+                    self.watchApp(pid, attempt: attempt + 1)
+                }
+            }
             return
         }
         CFRunLoopAddSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)

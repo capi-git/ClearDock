@@ -186,7 +186,8 @@ final class DockView: NSView {
         if let magnifyPosition, isPointerInside { magnify(at: magnifyPosition, animated: animated) }
         // The icon under the pointer may be a different one now (an app opened or quit, or the row
         // was reordered): hover follows what's actually under it.
-        if isPointerInside, let window, draggedID == nil {
+        // (Not while the icons are shifted inside a window still its old length: once it's narrowed.)
+        if isPointerInside, let window, draggedID == nil, offset == 0 {
             setHovered(model.index(at: convert(window.mouseLocationOutsideOfEventStream, from: nil)))
         }
         if renderedAny { MemoryRelief.soon() }
@@ -245,6 +246,8 @@ final class DockView: NSView {
         }
         entry.icon.contentsGravity = .resizeAspect
         entry.icon.contentsScale = scale
+        // Drawn bigger than shown when magnifying; scaled down smoothly at rest.
+        entry.icon.minificationFilter = .trilinear
         // A fixed shadow outline is drawn once by the system instead of being worked out per frame.
         let inset = iconSize * 0.09
         let outline = CGRect(x: 0, y: 0, width: iconSize, height: iconSize).insetBy(dx: inset, dy: inset)

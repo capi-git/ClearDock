@@ -24,7 +24,7 @@ final class WallpaperPalette {
     private var lastLooked: Date?
     /// What each desktop's wallpaper looked like, and when: going back to a desktop seen in the last
     /// minute uses that, rather than taking a picture of the screen again.
-    private var seen: [UInt64: (colors: (base: NSColor, top: NSColor, accents: [NSColor]), at: Date)] = [:]
+    private var seen: [UInt64: (colors: (base: NSColor, top: NSColor, accents: [NSColor]), file: URL?, at: Date)] = [:]
 
     /// Looks at the wallpaper again, a moment after the last time it's asked: desktop switches in a
     /// row, and the dock and the bar asking together, make one look, taken once a switch has
@@ -41,14 +41,14 @@ final class WallpaperPalette {
             try? await Task.sleep(for: .seconds(0.9))
             guard !Task.isCancelled else { return }
             let desktop = WindowSpaces.currentSpaceID(on: screen)
-            if !unlessRecent, let desktop, let kept = self?.seen[desktop], Date().timeIntervalSince(kept.at) < 60 {
+            if !unlessRecent, let desktop, let kept = self?.seen[desktop], kept.file == file, Date().timeIntervalSince(kept.at) < 60 {
                 self?.use(kept.colors)
                 return
             }
             guard let image = await Self.wallpaperImage(display: displayID, size: size, file: file) else { return }
             self?.lastLooked = Date()
             guard let self, !Task.isCancelled, let colors = Self.colors(in: image) else { return }
-            if let desktop { self.seen[desktop] = (colors, Date()) }
+            if let desktop { self.seen[desktop] = (colors, file, Date()) }
             self.use(colors)
         }
     }

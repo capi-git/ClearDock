@@ -34,7 +34,8 @@ final class LockIn {
 
     var onChange: () -> Void = {}
     /// The colour of the glowing edge, for the screen it's on.
-    var accent: (NSScreen) -> NSColor = { _ in .systemPurple }
+    /// The glow's colour for a desktop (by the window server's id) on a screen.
+    var accent: (NSScreen, UInt64) -> NSColor = { _, _ in .systemPurple }
     /// Asks you to choose two of the windows, and calls back with them, left then right, or with
     /// nil if you don't.
     var choose: (_ choices: [Choice], _ screen: NSScreen, _ done: @escaping ([Choice]?) -> Void) -> Void = { _, _, done in done(nil) }
@@ -148,8 +149,8 @@ final class LockIn {
         let session = LockInSession(space: space, display: display,
                                     panes: picked.map { LockInSession.Pane(pid: $0.pid, element: $0.element, id: $0.id) })
         session.accent = { [weak self, weak session] in
-            guard let self, let screen = session?.screen else { return .systemPurple }
-            return self.accent(screen)
+            guard let self, let session, let screen = session.screen else { return .systemPurple }
+            return self.accent(screen, session.space)
         }
         session.onEnd = { [weak self, weak session] in
             guard let self, let session else { return }
@@ -282,6 +283,9 @@ final class LockIn {
             session.showing = current.contains(session.space)
             session.showDecorationsAgain()
         }
+        // Back on a desktop whose room changed while it wasn't showing: once the dock and the bar
+        // have settled there, fit the two to it.
+        if sessions.values.contains(where: { $0.showing && refitWhenShowing.contains($0.space) }) { roomChanged() }
         bringBackSentAway()
     }
 
@@ -328,12 +332,27 @@ final class LockIn {
     }
 
     private var pendingRefit: DispatchWorkItem?
+    /// Locked-in desktops not showing when the room kept changed, to refit once they're back.
+    private var refitWhenShowing = Set<UInt64>()
 
-    /// A moment after the room kept changes (it often changes in a few steps), refits the two.
+    /// A moment after the room kept changes (it often changes in a few steps), refits the two on
+    /// the desktops showing. A desktop that isn't is left alone till you go back to it: the room
+    /// kept for the dock often changes just because you left (it hides on a locked-in desktop),
+    /// and changes back when you return.
     private func roomChanged() {
         pendingRefit?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.sessions.values.forEach { $0.refit() } }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for session in self.sessions.values {
+                    if session.showing {
+                        self.refitWhenShowing.remove(session.space)
+                        session.refit()
+                    } else {
+                        self.refitWhenShowing.insert(session.space)
+                    }
+                }
+            }
         }
         pendingRefit = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
@@ -532,8 +551,11 @@ private final class LockInSession {
     /// Where the two were last known to be, kept while the glow is put away (on another desktop, or
     /// in Mission Control), so it can come back without asking the apps where they are.
     private var knownFrames: [CGRect]?
-    /// The windows on screen at the last look for newcomers.
+    /// The windows on screen at the last look for newcomers, and how many times it's been asked to look.
     private var lastLookedAt: [UInt] = []
+    private var looks = 0
+    /// The two (by window) that are minimized right now: nothing to fit or draw round till they're back.
+    private var minimized = Set<CGWindowID>()
     /// Counts drags of the edge, so what's left over from one let go of just before doesn't act
     /// on the next.
     private var drag = 0
@@ -573,6 +595,7 @@ private final class LockInSession {
     }
 
     func begin() {
+        if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier { noteInFront(front) }
         watch()
         fit()
         // Then make room for an app that wouldn't go as narrow as its share.
@@ -645,7 +668,7 @@ private final class LockInSession {
 
     private func fit() {
         let goals = targets
-        for (pane, target) in zip(panes, goals) {
+        for (pane, target) in zip(panes, goals) where !minimized.contains(pane.id) {
             guard let frame = LockIn.frame(of: pane.element), !Self.close(frame, target) else { continue }
             // Size, place, and size again: some apps only accept a size that fits where they are.
             Self.setSize(pane.element, target.size)
@@ -798,9 +821,11 @@ private final class LockInSession {
     /// windows between desktops, so it's minimized until you get there, and comes back there).
     func moveNewcomers() {
         guard !ended, !dragging, showing else { return }
-        // Nothing on screen has changed since the last look: nothing new can have opened.
+        // Nothing on screen has changed since the last look: nothing new can have opened. (Every
+        // fourth time it looks anyway, for a window that was still fading in or growing then.)
         let numbers = OnScreenWindows.numbers().sorted()
-        guard numbers != lastLookedAt || numbers.isEmpty else { return }
+        looks += 1
+        guard numbers != lastLookedAt || numbers.isEmpty || looks % 4 == 0 else { return }
         let mine = Set(panes.map(\.pid))
         let me = getpid()
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
@@ -901,8 +926,14 @@ private final class LockInSession {
             }
             return
         }
-        // One of the two was minimized: nothing to draw round until it's back.
-        if notification == kAXWindowMiniaturizedNotification { return hideDecorations() }
+        // One of the two was minimized: nothing to draw round, or fit, until it's back.
+        if let pane = panes.first(where: { CFEqual($0.element, element) }) {
+            if notification == kAXWindowMiniaturizedNotification {
+                minimized.insert(pane.id)
+                return hideDecorations()
+            }
+            if notification == kAXWindowDeminiaturizedNotification { minimized.remove(pane.id) }
+        }
         // The moves Clear Dock is making as you drag the edge between them need nothing more.
         if dragging { return }
         // You're moving or resizing one yourself: the glow and the edge step aside until you let go,
@@ -932,7 +963,7 @@ private final class LockInSession {
     /// else where they are now.
     func updateDecorations(_ frames: [CGRect]? = nil) {
         if dragging, frames == nil { return }
-        guard !ended, showing, !LockIn.missionControlOpen, panes.count == 2,
+        guard !ended, showing, !LockIn.missionControlOpen, panes.count == 2, minimized.isEmpty,
               let frames = frames ?? currentFrames() else { return hideDecorations() }
         drawnFrames = frames
         knownFrames = frames
@@ -955,6 +986,8 @@ private final class LockInSession {
     /// After switching desktops or leaving Mission Control: put the glow and the edge back where
     /// the windows were (busy apps can be slow to say where they are, which would hold things up).
     func showDecorationsAgain() {
+        // Not under an edge being dragged: the drag draws its own, and puts these back when it ends.
+        guard !dragging else { return }
         updateDecorations(knownFrames)
     }
 
@@ -965,6 +998,7 @@ private final class LockInSession {
     }
 
     private func currentFrames() -> [CGRect]? {
+        guard minimized.isEmpty else { return nil }
         let frames = panes.compactMap { LockIn.frame(of: $0.element) }
         return frames.count == 2 ? frames : nil
     }
