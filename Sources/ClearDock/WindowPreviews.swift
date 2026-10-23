@@ -105,14 +105,20 @@ enum WindowFocus {
 
         // Put the chosen window on top of the app's others first, so it's the one that comes forward.
         let window = element(for: windowID, of: pid)
+        var activated = false
         if let window {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        } else if !AXIsProcessTrusted() {
-            showAccessibilitySettingsOnce()
+            activated = app.activate()
+        } else if AXIsProcessTrusted(), bringForward(windowID, of: pid) {
+            // Most apps only list the windows on the desktop you're on, so one on another desktop
+            // can't be found that way: the window server brings it forward, going to its desktop.
+            activated = true
+        } else {
+            if !AXIsProcessTrusted() { showAccessibilitySettingsOnce() }
+            activated = app.activate()
         }
-        let activated = app.activate()
         previewLog.notice("Preview click: window \(windowID) of \(app.localizedName ?? "?", privacy: .public); found window: \(window != nil); accessibility: \(AXIsProcessTrusted()); activated: \(activated)")
 
         // If macOS didn't let the app come forward, open it the way a Dock click does.
@@ -123,6 +129,39 @@ enum WindowFocus {
             config.activates = true
             NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
         }
+    }
+
+    private typealias GetProcess = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+    private typealias SetFrontProcess = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UInt32, UInt32) -> Int32
+    private typealias PostEventRecord = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UnsafeMutablePointer<UInt8>) -> Int32
+    private static let anywhere = UnsafeMutableRawPointer(bitPattern: -2)
+    private static let getProcess: GetProcess? = dlsym(anywhere, "GetProcessForPID").map { unsafeBitCast($0, to: GetProcess.self) }
+    private static let setFrontProcess: SetFrontProcess? = dlsym(anywhere, "_SLPSSetFrontProcessWithOptions")
+        .map { unsafeBitCast($0, to: SetFrontProcess.self) }
+    private static let postEventRecord: PostEventRecord? = dlsym(anywhere, "SLPSPostEventRecordTo")
+        .map { unsafeBitCast($0, to: PostEventRecord.self) }
+
+    /// Brings one window forward through the window server, as window managers (like yabai) do,
+    /// even when it's on another desktop: its app comes to the front with that window, and macOS
+    /// goes to the window's desktop. Returns false if that isn't available.
+    private static func bringForward(_ windowID: CGWindowID, of pid: pid_t) -> Bool {
+        guard let getProcess, let setFrontProcess, let postEventRecord else { return false }
+        var process = ProcessSerialNumber()
+        guard getProcess(pid, &process) == noErr,
+              setFrontProcess(&process, windowID, 0x200) == 0 else { return false }  // 0x200: as if you did it
+        // Then make it the app's key window: the same two records a click on the window would send.
+        for kind: UInt8 in [1, 2] {
+            var record = [UInt8](repeating: 0, count: 0xF8)
+            record[0x04] = 0xF8
+            record[0x08] = kind
+            record[0x3A] = 0x10
+            for i in 0x20..<0x30 { record[i] = 0xFF }
+            withUnsafeBytes(of: windowID.littleEndian) { bytes in
+                for (i, byte) in bytes.enumerated() { record[0x3C + i] = byte }
+            }
+            _ = record.withUnsafeMutableBufferPointer { postEventRecord(&process, $0.baseAddress!) }
+        }
+        return true
     }
 
     /// Choosing one particular window needs Accessibility permission. If it's missing,
