@@ -99,6 +99,41 @@ enum WindowFocus {
 
     static func raise(_ windowID: CGWindowID, of pid: pid_t) {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        // A window on another desktop: macOS brings its app forward without going there, so
+        // nothing seems to happen. Go to that desktop first, as the top bar's desktop buttons do,
+        // and bring the window forward once it's showing.
+        if element(for: windowID, of: pid) == nil, let desktop = desktop(holding: windowID), DesktopSwitcher.switchTo(desktop) {
+            previewLog.notice("Preview click: window \(windowID) is on desktop \(desktop.number); going there first")
+            whenShowing(desktop.id, waited: 0) { focus(windowID, of: app) }
+            return
+        }
+        focus(windowID, of: app)
+    }
+
+    /// The ordinary desktop a window is on, when it isn't showing and is on the display under
+    /// the pointer (the one the desktop shortcuts act on).
+    private static func desktop(holding windowID: CGWindowID) -> Desktop? {
+        let spaces = WindowSpaces.spaceIDs(of: windowID)
+        guard spaces.count == 1 else { return nil }
+        let pointer = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }?.displayUUID
+        return DesktopReader.read()
+            .filter { $0.key == "Main" || $0.key == pointer }
+            .values.joined()
+            .first { $0.id == spaces[0] && !$0.isCurrent }
+    }
+
+    /// Runs `then` once the desktop is showing, or after two seconds if it never does.
+    private static func whenShowing(_ space: UInt64, waited: Double, then: @escaping @MainActor () -> Void) {
+        if WindowSpaces.currentSpaceIDs().contains(space) || waited >= 2 {
+            // Its windows are listed a moment after the switch begins.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { then() }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { whenShowing(space, waited: waited + 0.05, then: then) }
+    }
+
+    private static func focus(_ windowID: CGWindowID, of app: NSRunningApplication) {
+        let pid = app.processIdentifier
         // The click landed on Clear Dock, so it may become active for a moment and hand focus on.
         NSApp.activate()
         NSApp.yieldActivation(to: app)
@@ -129,7 +164,9 @@ enum WindowFocus {
             let front = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
                 .first { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }?[kCGWindowNumber as String] as? CGWindowID
             previewLog.notice("Preview click: the clicked window is in front: \(front == windowID)")
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier != pid, let url = app.bundleURL else { return }
+            // Not Finder: opening it again is how you ask it for a new window.
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier != pid, app.bundleIdentifier != "com.apple.finder",
+                  let url = app.bundleURL else { return }
             previewLog.notice("Preview click: app wasn't in front yet, opening it instead")
             let config = NSWorkspace.OpenConfiguration()
             config.activates = true

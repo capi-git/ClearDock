@@ -179,21 +179,7 @@ enum DesktopSwitcher {
 
     static func go(to desktop: Desktop) {
         guard !desktop.isCurrent else { return }
-        if AXIsProcessTrusted() {
-            if let shortcut = shortcut(for: desktop.number) {
-                press(shortcut)
-                return
-            }
-            if let steps = desktop.stepsFromCurrent, steps != 0, let move = moveShortcut(right: steps > 0) {
-                // A short pause between presses lets macOS take each one.
-                for step in 0..<abs(steps) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06 * Double(step)) {
-                        MainActor.assumeIsolated { press(move) }
-                    }
-                }
-                return
-            }
-        }
+        if switchTo(desktop) { return }
         if let window = desktop.frontWindow, let app = desktop.frontApp {
             WindowFocus.raise(window, of: app)
             return
@@ -204,6 +190,25 @@ enum DesktopSwitcher {
             explained = true
             explainShortcuts()
         }
+    }
+
+    /// Presses macOS's shortcut for going to the desktop. False when none of them is on, or
+    /// Accessibility (which pressing them needs) isn't allowed.
+    @discardableResult
+    static func switchTo(_ desktop: Desktop) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        if let shortcut = shortcut(for: desktop.number) {
+            press(shortcut)
+            return true
+        }
+        guard let steps = desktop.stepsFromCurrent, steps != 0, let move = moveShortcut(right: steps > 0) else { return false }
+        // A short pause between presses lets macOS take each one.
+        for step in 0..<abs(steps) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06 * Double(step)) {
+                MainActor.assumeIsolated { press(move) }
+            }
+        }
+        return true
     }
 
     /// The explanation shows once each time Clear Dock opens; after that a click just beeps.
