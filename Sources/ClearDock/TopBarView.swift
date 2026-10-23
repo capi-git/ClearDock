@@ -43,6 +43,7 @@ struct TopBarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\.barLook, look)
+        .environment(\.pointerInBar, model.pointerInBar.contains(screenKey))
         .animation(.easeInOut(duration: 0.45), value: look)
 
     }
@@ -60,11 +61,21 @@ private struct BarLookKey: EnvironmentKey {
     static let defaultValue = BarLook()
 }
 
+private struct PointerInBarKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
 extension EnvironmentValues {
     /// The look of the bar a view is in.
     var barLook: BarLook {
         get { self[BarLookKey.self] }
         set { self[BarLookKey.self] = newValue }
+    }
+
+    /// Whether the pointer is on the bar a view is in; a hover highlight shows only while it is.
+    var pointerInBar: Bool {
+        get { self[PointerInBarKey.self] }
+        set { self[PointerInBarKey.self] = newValue }
     }
 }
 
@@ -196,6 +207,7 @@ private struct Segment<Content: View>: View {
     var dimmed = false
     @ViewBuilder var content: Content
     @State private var hovering = false
+    @Environment(\.pointerInBar) private var pointerInBar
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: max(2, look.cornerRadius - 3), style: .continuous)
@@ -207,7 +219,7 @@ private struct Segment<Content: View>: View {
             .background {
                 if highlighted {
                     shape.fill(Color(nsColor: look.accent).opacity(0.95))
-                } else if hovering {
+                } else if hovering && pointerInBar {
                     shape.fill(Color.white.opacity(0.1))
                 }
             }
@@ -456,6 +468,7 @@ struct Pill<Content: View>: View {
     var action: (() -> Void)?
     @ViewBuilder var content: Content
     @State private var hovering = false
+    @Environment(\.pointerInBar) private var pointerInBar
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: look.cornerRadius, style: .continuous)
@@ -473,7 +486,7 @@ struct Pill<Content: View>: View {
             }
         }
         .overlay {
-            if hovering && action != nil {
+            if hovering && pointerInBar && action != nil {
                 shape.fill(Color.white.opacity(highlighted ? 0.14 : 0.08)).allowsHitTesting(false)
             }
         }

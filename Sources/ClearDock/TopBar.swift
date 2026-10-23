@@ -110,6 +110,9 @@ final class TopBarModel: ObservableObject {
     @Published var lockInChoosing: UInt64?
     /// Lock-in mode is getting a desktop's windows ready.
     @Published var lockInStarting = false
+    /// Screens whose bar the pointer is on, so a piece's hover highlight goes once it leaves even if
+    /// that piece missed hearing so.
+    @Published var pointerInBar = Set<String>()
     /// Screens whose bar is filled in behind its pieces while the pointer is at the top, so the
     /// macOS menu bar sliding down underneath doesn't show through.
     @Published var backdropScreens = Set<String>()
@@ -185,14 +188,27 @@ final class BarPanel: OverlayPanel {
 @MainActor
 final class BarHostingView: NSHostingView<TopBarView> {
     var onTopEdge: () -> Void = {}
+    /// The pointer came onto the bar (true) or left it (false).
+    var onPointer: (Bool) -> Void = { _ in }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if !trackingAreas.contains(where: { $0.owner === self && $0.options.contains(.mouseMoved) }) {
-            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                           owner: self))
         }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        onPointer(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onPointer(false)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -680,6 +696,16 @@ final class TopBarController {
         let panel = BarPanel()
         let view = BarHostingView(rootView: TopBarView(model: model, screenKey: String(id)))
         view.onTopEdge = { [weak self] in self?.pointerAtTop(of: id) }
+        view.onPointer = { [weak self] inside in
+            guard let self else { return }
+            if inside {
+                self.model.pointerInBar.insert(String(id))
+            } else {
+                self.model.pointerInBar.remove(String(id))
+                // Off the bar and not onto its pop-up: the pop-up can go.
+                self.popover.release()
+            }
+        }
         panel.contentView = view
         panels[id] = (panel, view)
         return (panel, view)

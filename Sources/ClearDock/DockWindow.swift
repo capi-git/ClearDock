@@ -110,6 +110,10 @@ final class DockController {
             self.container.barRect = self.model.layout.barRect(from: span?.lowerBound, to: span?.upperBound)
         }
         previews.onExit = { [weak self] in self?.scheduleHide() }
+        previews.pointerOnDock = { [weak self] in
+            guard let self, self.shown else { return false }
+            return self.panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation)
+        }
         view.settingsMenu = { [weak self] in
             let menu = NSMenu()
             SettingsMenu.add(to: menu) { self?.settingsChanged() }

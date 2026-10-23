@@ -446,6 +446,12 @@ final class WindowPreviewController {
 
     /// Called when the pointer leaves the preview, so the dock can decide whether to hide too.
     var onExit: (() -> Void)?
+    /// Whether the pointer is on the dock itself.
+    var pointerOnDock: () -> Bool = { false }
+    /// Checks where the pointer is while a preview is open, so it closes even if the system never
+    /// said the pointer left.
+    private var watch: Timer?
+    private var misses = 0
 
     init() {
         panel.onPick = { [weak self] windowID in self?.pick(windowID) }
@@ -496,6 +502,27 @@ final class WindowPreviewController {
         pointerInPanel = false
         if panel.isVisible { MemoryRelief.soon() }
         panel.dismiss()
+        watch?.invalidate()
+        watch = nil
+    }
+
+    private func startWatching() {
+        guard watch == nil else { return }
+        misses = 0
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.contains(NSEvent.mouseLocation) || self.pointerOnDock() {
+                    self.misses = 0
+                } else {
+                    self.misses += 1
+                    if self.misses >= 2 { self.close() }
+                }
+            }
+        }
+        timer.tolerance = 0.05
+        RunLoop.main.add(timer, forMode: .common)
+        watch = timer
     }
 
     private func open(_ appID: String, pid: pid_t, anchor: NSRect, screen: NSScreen, scale: CGFloat, edge: DockEdge) {
@@ -512,6 +539,7 @@ final class WindowPreviewController {
             self.pid = pid
             self.lastPlacement = (appID, anchor, screen, scale, edge)
             self.panel.show(shots, beside: anchor, edge: edge, on: screen, scale: scale, fadeIn: !wasVisible)
+            self.startWatching()
         }
     }
 

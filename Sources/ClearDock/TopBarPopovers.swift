@@ -11,6 +11,12 @@ final class BarPopover {
     private var hideWork: DispatchWorkItem?
     /// What's showing, such as "song" or "desktop-…".
     private(set) var showing: String?
+    /// Checks where the pointer is while a pop-up is open, so it closes even if the system never
+    /// said the pointer left (which can happen moving quickly off the bar).
+    private var watch: Timer?
+    private var misses = 0
+    /// The bottom of the bar the pop-up hangs from, and its screen.
+    private var bar: (bottom: CGFloat, screen: NSScreen)?
 
     init() {
         panel.onEnter = { [weak self] in self?.hideWork?.cancel() }
@@ -39,6 +45,8 @@ final class BarPopover {
     func hide() {
         showWork?.cancel()
         hideWork?.cancel()
+        watch?.invalidate()
+        watch = nil
         guard showing != nil else { return }
         showing = nil
         panel.orderOut(nil)
@@ -64,6 +72,33 @@ final class BarPopover {
             }
         }
         showing = id
+        bar = (barBottom, screen)
+        startWatching()
+    }
+
+    private func startWatching() {
+        guard watch == nil else { return }
+        misses = 0
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkPointer() }
+        }
+        timer.tolerance = 0.05
+        RunLoop.main.add(timer, forMode: .common)
+        watch = timer
+    }
+
+    /// Closes the pop-up after the pointer has been away from both it and the bar for a moment.
+    private func checkPointer() {
+        guard showing != nil, let bar else { return hide() }
+        let mouse = NSEvent.mouseLocation
+        let onPopUp = panel.frame.insetBy(dx: -12, dy: -12).contains(mouse)
+        let onBar = NSMouseInRect(mouse, bar.screen.frame, false) && mouse.y >= bar.bottom - 2
+        if onPopUp || onBar {
+            misses = 0
+        } else {
+            misses += 1
+            if misses >= 2 { hide() }
+        }
     }
 
     private func scheduleHide() {
