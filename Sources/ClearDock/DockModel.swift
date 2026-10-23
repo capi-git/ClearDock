@@ -43,6 +43,8 @@ struct DockLayout {
     var iconSize: CGFloat
     /// A background bar needs a little room around the icons.
     var hasBackground = false
+    /// Whether open apps get a mark beside them, which needs a strip of its own.
+    var showsMarks = true
     /// Space between icons, as a multiple of the normal gap.
     var spacing: CGFloat = 1
     /// Room on the far side of the icons (away from the screen edge) for hover effects to move into.
@@ -54,13 +56,19 @@ struct DockLayout {
 
     /// Room on the far side of the icons, where notification badges overhang.
     var farInset: CGFloat { (hasBackground ? 10 : 5) + hoverRoom }
-    /// Room on the screen-edge side, below the running-app marks.
-    var edgeInset: CGFloat { hasBackground ? 7 : 4 }
+    /// Room on the screen-edge side, below the running-app marks. Without marks, as much as on the
+    /// far side, so the icons sit in the middle of a background (and where they always have without one).
+    var edgeInset: CGFloat {
+        if showsMarks { return hasBackground ? 7 : 4 }
+        return hasBackground ? 10 : 4 + Self.dotHeight
+    }
+    /// The strip beside the icons for the running-app marks; none when they're off.
+    var markRoom: CGFloat { showsMarks ? Self.dotHeight : 0 }
     var endPadding: CGFloat { hasBackground ? 14 : 6 }
     var gap: CGFloat { max(2, (iconSize * 0.12 * spacing).rounded()) }
     var separatorWidth: CGFloat { max(9, (iconSize * 0.25).rounded()) }
     /// The dock's depth, from the screen edge outwards.
-    var thickness: CGFloat { farInset + iconSize + Self.dotHeight + edgeInset }
+    var thickness: CGFloat { farInset + iconSize + markRoom + edgeInset }
 
     /// Position along the row.
     func along(_ point: CGPoint) -> CGFloat { edge.isVertical ? point.y : point.x }
@@ -70,7 +78,7 @@ struct DockLayout {
     func frame(at position: CGFloat, length: CGFloat) -> CGRect {
         switch edge {
         case .bottom: CGRect(x: position, y: farInset, width: length, height: iconSize)
-        case .left: CGRect(x: edgeInset + Self.dotHeight, y: position, width: iconSize, height: length)
+        case .left: CGRect(x: edgeInset + markRoom, y: position, width: iconSize, height: length)
         case .right: CGRect(x: farInset, y: position, width: iconSize, height: length)
         }
     }
@@ -223,6 +231,7 @@ final class DockModel {
         }
         var layout = DockLayout(
             edge: Settings.position, iconSize: iconSize, hasBackground: Appearance.hasBackground,
+            showsMarks: Appearance.markerStyle != .none,
             spacing: CGFloat(Appearance.spacing), hoverRoom: hoverRoom,
             endRoom: effect == .magnify ? (iconSize * grow * 1.8).rounded() : 0)
         var position = layout.endPadding + layout.endRoom
