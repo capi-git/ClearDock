@@ -816,7 +816,9 @@ final class TopBarController {
         // Already watching the pointer up here: it carries on following it.
         guard holdScreen != id || holdTimer == nil else { return }
         guard BarSettings.takesMenuBarsPlace, revealTimer == nil, !coveredScreens.contains(id) else { return }
-        if Date().timeIntervalSince(backdropsTaken) > 120, backdropTask == nil { refreshBackdrops(after: 0) }
+        // Fairly fresh: a live wallpaper (like Wallspace's) moves, and an old picture of it would
+        // show as a seam along the bar.
+        if Date().timeIntervalSince(backdropsTaken) > 20, backdropTask == nil { refreshBackdrops(after: 0) }
         if holdScreen != id { heldSince = Date() }
         holdScreen = id
         leftTopSince = nil

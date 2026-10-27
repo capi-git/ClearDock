@@ -163,7 +163,11 @@ enum AppWindowList {
     /// The level a window sits at: 0 for ordinary windows, higher for things like a game's
     /// full-screen layer.
     static func layer(of windowID: CGWindowID) -> Int? {
-        let info = CGWindowListCreateDescriptionFromArray([NSNumber(value: windowID)] as CFArray) as? [[String: Any]]
+        // It takes the window numbers themselves in the list, not numbers wrapped as objects (with
+        // those it quietly finds nothing).
+        var number: UnsafeRawPointer? = UnsafeRawPointer(bitPattern: UInt(windowID))
+        guard number != nil, let list = CFArrayCreate(nil, &number, 1, nil) else { return nil }
+        let info = CGWindowListCreateDescriptionFromArray(list) as? [[String: Any]]
         return info?.first?[kCGWindowLayer as String] as? Int
     }
 

@@ -398,9 +398,11 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
         AXUIElementSetMessagingTimeout(window, 0.35)
         // Full-screen windows have their own desktop and can't be resized.
         if (Self.attribute(window, "AXFullScreen") as? Bool) == true { return }
-        // Leave anything that isn't an ordinary window alone (like a game's full-screen layer); games
-        // themselves were left out before getting here.
-        if let id = AppWindowList.windowID(of: window), let layer = AppWindowList.layer(of: id), layer != 0 { return }
+        // Only ordinary windows. Anything else is left alone: a live wallpaper app's wallpaper (like
+        // Wallspace's, a window filling the screen behind everything else), a game's full-screen
+        // layer, panels. Games themselves were left out before getting here.
+        guard Self.attribute(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole else { return }
+        guard let id = AppWindowList.windowID(of: window), AppWindowList.layer(of: id) == 0 else { return }
         if (Self.attribute(window, kAXMinimizedAttribute) as? Bool) == true { return }
         guard let origin = Self.point(window, kAXPositionAttribute), let size = Self.size(window, kAXSizeAttribute) else { return }
         let original = CGRect(origin: origin, size: size)
