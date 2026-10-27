@@ -182,30 +182,15 @@ private final class TrackingView: NSView {
     override func mouseExited(with event: NSEvent) { onExit() }
 }
 
-/// The pop-up's background: blurred, tinted with the bar's colour, rounded.
+/// The pop-up's background: the bar's colour, solid, rounded.
 private struct PopoverBackground: View {
     let look: BarLook
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-        ZStack {
-            PopoverBlur().clipShape(shape)
-            shape.fill(Color(nsColor: look.fill).opacity(0.78))
-        }
-        .overlay(shape.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+        shape.fill(Color(nsColor: look.fill))
+            .overlay(shape.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
     }
-}
-
-private struct PopoverBlur: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .hudWindow
-        view.blendingMode = .behindWindow
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
 // MARK: - Peeking at a desktop

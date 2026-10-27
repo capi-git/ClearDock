@@ -74,6 +74,10 @@ struct BarLayout: Equatable {
     var middleGap: CGFloat = 0
     /// Which display's desktops this bar shows.
     var desktopsKey = "Main"
+    /// Drawn as one solid strip, rather than pieces with the wallpaper between them: while macOS
+    /// keeps its own menu bar up behind the bar (some apps, like Microsoft Teams, have it stay up
+    /// while they're in front, even though it's set to hide), it would show between the pieces.
+    var solidStrip = false
 }
 
 /// Colours taken from an album cover.
@@ -271,6 +275,9 @@ final class TopBarController {
     private var pendingLayout: DispatchWorkItem?
     /// Screens where a game or another full-screen window is in front; the bar steps aside there.
     private var coveredScreens = Set<CGDirectDisplayID>()
+    /// Screens where macOS keeps its menu bar up behind the bar without the pointer being there
+    /// (an app in front has it stay up).
+    private var menuBarHeldUp = Set<CGDirectDisplayID>()
     /// Bars sliding away from a game right now.
     private var leaving = Set<CGDirectDisplayID>()
     private let popover = BarPopover()
@@ -648,7 +655,8 @@ final class TopBarController {
                 gap = max(gap, 2 * max(barRect.midX - island.minX, island.maxX - barRect.midX) + 16)
             }
             let key = sharedDesktops ? "Main" : (screen.displayUUID ?? "Main")
-            layouts[String(id)] = BarLayout(width: frame.width, middleGap: gap, desktopsKey: key)
+            layouts[String(id)] = BarLayout(width: frame.width, middleGap: gap, desktopsKey: key,
+                                            solidStrip: replacesMenuBar && menuBarHeldUp.contains(id))
             reserved.append((frame.minY, screen))
         }
         for (id, entry) in panels where !kept.contains(id) {
@@ -923,7 +931,8 @@ final class TopBarController {
            mouse.y > screen.frame.maxY - 60 { return }
         // Stay out of the way for as long as the macOS menu bar is down or one of its menus is open,
         // however long you take. (Five minutes at most, in case macOS ever stops showing either.)
-        if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarOrMenuShowing() { return }
+        let heldUp = revealScreen.map(menuBarHeldUp.contains) == true
+        if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarOrMenuShowing(countingMenuBar: !heldUp) { return }
         revealTimer?.invalidate()
         revealTimer = nil
         revealScreen = nil
@@ -931,9 +940,10 @@ final class TopBarController {
         setBarsVisible(true)
     }
 
-    /// Whether a macOS menu bar is down on any screen, or a menu (from the menu bar or a
-    /// right-click) is open in any app, from one look at the windows on screen.
-    private static func menuBarOrMenuShowing() -> Bool {
+    /// Whether a macOS menu bar is down on any screen (unless `countingMenuBar` is off: an app
+    /// holds it up, and it won't go), or a menu (from the menu bar or a right-click) is open in any
+    /// app, from one look at the windows on screen.
+    private static func menuBarOrMenuShowing(countingMenuBar: Bool = true) -> Bool {
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         let menuBar = Int(CGWindowLevelForKey(.mainMenuWindow))
         let menu = Int(CGWindowLevelForKey(.popUpMenuWindow))
@@ -941,7 +951,7 @@ final class TopBarController {
         return windows.contains { info in
             let layer = info[kCGWindowLayer as String] as? Int
             if layer == menu { return (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.5 }
-            guard layer == menuBar, info[kCGWindowOwnerName as String] as? String == "Window Server",
+            guard countingMenuBar, layer == menuBar, info[kCGWindowOwnerName as String] as? String == "Window Server",
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
             return screens.contains { abs($0.minY - rect.minY) < 1 && rect.width >= $0.width - 1 }
@@ -1023,9 +1033,18 @@ final class TopBarController {
         // while it's busy (opening Mission Control, say), and nothing should wait on that.
         desktopQueue.async { [weak self] in
             var covered = Set<CGDirectDisplayID>()
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            // macOS's own menu bar, up along the top of a screen.
+            var held = Set<CGDirectDisplayID>()
+            let menuLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
+            for info in windows where info[kCGWindowLayer as String] as? Int == menuLevel
+                && info[kCGWindowOwnerName as String] as? String == "Window Server" {
+                guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                      let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
+                for (id, area) in screens where abs(area.minY - rect.minY) < 1 && rect.width >= area.width - 1 { held.insert(id) }
+            }
             if let pid {
                 let game = Games.isGame(pid)
-                let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
                 for info in windows where info[kCGWindowOwnerPID as String] as? pid_t == pid {
                     guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                           let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
@@ -1042,7 +1061,12 @@ final class TopBarController {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, self.running, covered != self.coveredScreens else { return }
+                    guard let self, self.running else { return }
+                    // Up because you're reaching for it (the pointer at the top) doesn't count.
+                    let reaching = self.holdTimer != nil || self.revealTimer != nil
+                    let heldChanged = !reaching && held != self.menuBarHeldUp
+                    if heldChanged { self.menuBarHeldUp = held }
+                    guard covered != self.coveredScreens || heldChanged else { return }
                     self.coveredScreens = covered
                     self.layout()
                 }
@@ -1106,7 +1130,9 @@ final class TopBarController {
         let darken = max(0.35, 1 - 0.28 / max(palette.top.lightness, 0.01))
         look.fill = BarSettings.style == .color ? BarSettings.color
             : (palette.top.blended(withFraction: darken, of: .black) ?? palette.top)
-        look.opacity = BarSettings.opacity
+        // Solid colours: see-through pieces would have to blur whatever's behind them again at every
+        // frame of a moving wallpaper.
+        look.opacity = 1
         let index = BarSettings.accentIndex
         look.accent = index >= 0 ? palette.accents[min(index, palette.accents.count - 1)] : BarSettings.accentColor
         look.size = BarSettings.size

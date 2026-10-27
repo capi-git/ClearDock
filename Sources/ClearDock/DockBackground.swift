@@ -150,20 +150,12 @@ final class DockBackgroundView: NSView {
             }
             glass?.tintColor = look.glassTint?.withAlphaComponent(0.35)
         } else if look.style != .none {
+            // A solid colour like the bar's pieces: nothing behind it to blur again at every frame
+            // of a moving wallpaper.
             glass?.removeFromSuperview()
             glass = nil
-            if blur == nil {
-                let view = NSVisualEffectView(frame: bounds)
-                view.material = .hudWindow
-                view.blendingMode = .behindWindow
-                view.state = .active
-                view.wantsLayer = true
-                view.layer?.cornerCurve = .continuous
-                view.layer?.masksToBounds = true
-                view.autoresizingMask = [.width, .height]
-                addSubview(view, positioned: .below, relativeTo: nil)
-                blur = view
-            }
+            blur?.removeFromSuperview()
+            blur = nil
             plain.isHidden = false
             if let layer = plain.layer {
                 CATransaction.begin()

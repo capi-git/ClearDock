@@ -31,9 +31,12 @@ struct TopBarView: View {
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {
-                    // While the pointer is at the top, the wallpaper that's behind the bar is drawn
-                    // in, so the bar looks the same but hides the macOS menu bar sliding down underneath.
-                    if model.backdropScreens.contains(screenKey), let backdrop = model.backdrops[screenKey] {
+                    if layout.solidStrip {
+                        // A deep shade of the bar's colour, hiding macOS's menu bar held up behind it.
+                        Color(nsColor: look.fill.blended(withFraction: 0.6, of: .black) ?? .black)
+                    } else if model.backdropScreens.contains(screenKey), let backdrop = model.backdrops[screenKey] {
+                        // While the pointer is at the top, the wallpaper that's behind the bar is drawn
+                        // in, so the bar looks the same but hides the macOS menu bar sliding down underneath.
                         Image(decorative: backdrop, scale: 1).resizable()
                     }
                 }
@@ -517,12 +520,9 @@ private struct PillBackground: View {
             } else if look.style == .none {
                 Color.clear
             } else {
-                // The wallpaper blurred, tinted with the bar's colour, like frosted glass.
-                ZStack {
-                    BehindWindowBlur().clipShape(shape)
-                    shape.fill(Color(nsColor: look.fill).opacity(look.opacity))
-                }
-                .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+                // A solid colour (from the wallpaper, or your own), with a fine light edge.
+                shape.fill(Color(nsColor: look.fill))
+                    .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
             }
         }
         // A desktop's colour coming or going fades in; nothing else waits for it.
@@ -544,18 +544,6 @@ private struct BarSymbol: View {
             .foregroundStyle(Color(nsColor: color ?? look.accent))
             .frame(width: width)
     }
-}
-
-private struct BehindWindowBlur: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .hudWindow
-        view.blendingMode = .behindWindow
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
 /// Catches scrolling over a piece of the bar, and lets clicks through to it.

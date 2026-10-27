@@ -806,9 +806,6 @@ private struct TopBarTab: View {
                 if store.barStyle == .color {
                     ColorPicker("Colour", selection: $store.barColor, supportsOpacity: false)
                 }
-                if store.barStyle == .color || store.barStyle == .wallpaper {
-                    Slider(value: $store.barOpacity, in: 0.15...1) { Text("Strength") }
-                }
                 LabeledContent("Highlight") {
                     HStack(spacing: 8) {
                         ForEach(Array(store.wallpaperAccents.enumerated()), id: \.offset) { index, color in
