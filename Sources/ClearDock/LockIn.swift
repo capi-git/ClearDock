@@ -347,6 +347,8 @@ final class LockIn {
     }
 
     private func moveNewcomers() {
+        // Not in Mission Control: its own windows come and go then, and macOS is busy drawing it.
+        guard !Self.missionControlOpen else { return }
         for session in sessions.values where session.showing { session.moveNewcomers() }
     }
 
@@ -732,6 +734,9 @@ private final class LockInSession {
     /// share the screen, a window dragged over the other's side swaps them, and everything else
     /// snaps back. Also makes room for an app that won't go as narrow as its share.
     private func settle() {
+        // Not while Mission Control is open (it may have opened since this was asked for, before
+        // the bar's check noticed): where it shows the windows isn't where they are.
+        guard !LockIn.missionControlOpen, !MissionControl.isShowing else { return }
         guard let area, let frames = currentFrames() else { return }
         if stacked {
             settleStack(frames, in: area)
@@ -1086,6 +1091,9 @@ private final class LockInSession {
         }
         // The moves Clear Dock is making as you drag the edge between them need nothing more.
         if dragging { return }
+        // Mission Control shrinking them into its overview (and growing them back) isn't you
+        // moving them: nothing to put right, and resizing apps then would only make it stutter.
+        if LockIn.missionControlOpen { return }
         // You're moving or resizing one yourself: the glow and the edge step aside until you let go,
         // rather than asking the app where its window is at every step.
         if NSEvent.pressedMouseButtons != 0 { hideDecorations() }

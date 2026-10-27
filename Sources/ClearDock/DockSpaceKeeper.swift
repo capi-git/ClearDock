@@ -346,8 +346,9 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
         // asking every app (some of them busy) would take a long while.
         let strips = strips
         guard !strips.isEmpty else { return }
-        // Never under a window you're dragging or resizing: once the button is up.
-        if Self.mouseButtonDown { return perform(after: 0.3) { self.fitAllWindows() } }
+        // Never under a window you're dragging or resizing: once the button is up. Nor while
+        // Mission Control shows them shrunk into its overview.
+        if Self.mouseButtonDown || MissionControl.isShowing { return perform(after: 0.5) { self.fitAllWindows() } }
         let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         var reaching = Set<pid_t>()
         for info in onScreen where (info[kCGWindowLayer as String] as? Int) == 0 {
@@ -367,6 +368,8 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
         // Games are left alone.
         var pid: pid_t = 0
         if AXUIElementGetPid(window, &pid) == .success, Games.isGame(pid) { return }
+        // Windows shrunk into Mission Control's overview aren't where they really are.
+        if MissionControl.isShowing { return }
         Self.fit(window, into: strips)
     }
 

@@ -260,6 +260,33 @@ enum OnScreenWindows {
     }
 }
 
+/// Mission Control and App Exposé. macOS doesn't announce either, but while one is open its
+/// window manager draws a backdrop over each screen. Safe to ask from any thread.
+enum MissionControl {
+    /// Where its backdrops are, in the system's window coordinates; none while it's closed.
+    static func backdrops() -> [CGRect] {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.compactMap { info in
+            guard info[kCGWindowOwnerName as String] as? String == "WindowManager", info[kCGWindowLayer as String] as? Int == 19,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+            return CGRect(dictionaryRepresentation: bounds)
+        }
+    }
+
+    /// Whether it's open on any screen right now: a backdrop covering a whole display.
+    static var isShowing: Bool {
+        let backdrops = backdrops()
+        guard !backdrops.isEmpty else { return false }
+        var count: UInt32 = 0
+        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
+        guard CGGetActiveDisplayList(16, &displays, &count) == .success else { return false }
+        return displays.prefix(Int(count)).contains { display in
+            let bounds = CGDisplayBounds(display)
+            return backdrops.contains { $0.insetBy(dx: -2, dy: -2).contains(bounds.insetBy(dx: 2, dy: 2)) }
+        }
+    }
+}
+
 /// The system's private channel to the Dock, used here only to open App Exposé.
 enum CoreDock {
     private typealias SendNotification = @convention(c) (CFString, Int32) -> Void

@@ -686,23 +686,13 @@ final class TopBarController {
             let numbers = OnScreenWindows.numbers()
             guard numbers != seen || numbers.isEmpty else { return }
             seen = numbers
-            let backdrops = Self.missionControlBackdrops()
+            let backdrops = MissionControl.backdrops()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.checkExpose(backdrops) }
             }
         }
         timer.resume()
         exposeTimer = timer
-    }
-
-    /// Where Mission Control's backdrops are, in the system's window coordinates.
-    nonisolated private static func missionControlBackdrops() -> [CGRect] {
-        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        return windows.compactMap { info in
-            guard info[kCGWindowOwnerName as String] as? String == "WindowManager", info[kCGWindowLayer as String] as? Int == 19,
-                  let bounds = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
-            return CGRect(dictionaryRepresentation: bounds)
-        }
     }
 
     private func checkExpose(_ backdrops: [CGRect]) {
@@ -1025,30 +1015,37 @@ final class TopBarController {
         // Nor does macOS itself coming forward (the lock screen, a password prompt, the screen saver):
         // the bar would slide away when the Mac locks and back again when you unlock it.
         if let front = NSWorkspace.shared.frontmostApplication, front.activationPolicy != .regular { return }
-        var covered = Set<CGDirectDisplayID>()
-        if let front = NSWorkspace.shared.frontmostApplication {
-            let pid = front.processIdentifier
-            let game = Games.isGame(pid)
-            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-            for info in windows where info[kCGWindowOwnerPID as String] as? pid_t == pid {
-                guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
-                      let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
-                let layer = info[kCGWindowLayer as String] as? Int ?? 0
-                for screen in NSScreen.screens {
-                    guard let id = screen.displayID else { continue }
-                    let area = Self.topDown(screen.frame)
-                    let overlap = rect.intersection(area)
-                    guard !overlap.isNull else { continue }
-                    let share = overlap.width * overlap.height / (area.width * area.height)
-                    // A game covering most of a screen, or a special window covering all of it.
-                    // An ordinary window made as big as the screen still gets room made for the bar.
-                    if (game && share > 0.8) || (layer > 0 && share > 0.97) { covered.insert(id) }
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let screens = NSScreen.screens.compactMap { screen in screen.displayID.map { ($0, Self.topDown(screen.frame)) } }
+        // The windows on screen are looked at off the main thread: macOS can be slow to list them
+        // while it's busy (opening Mission Control, say), and nothing should wait on that.
+        desktopQueue.async { [weak self] in
+            var covered = Set<CGDirectDisplayID>()
+            if let pid {
+                let game = Games.isGame(pid)
+                let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+                for info in windows where info[kCGWindowOwnerPID as String] as? pid_t == pid {
+                    guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                          let rect = CGRect(dictionaryRepresentation: bounds) else { continue }
+                    let layer = info[kCGWindowLayer as String] as? Int ?? 0
+                    for (id, area) in screens {
+                        let overlap = rect.intersection(area)
+                        guard !overlap.isNull else { continue }
+                        let share = overlap.width * overlap.height / (area.width * area.height)
+                        // A game covering most of a screen, or a special window covering all of it.
+                        // An ordinary window made as big as the screen still gets room made for the bar.
+                        if (game && share > 0.8) || (layer > 0 && share > 0.97) { covered.insert(id) }
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.running, covered != self.coveredScreens else { return }
+                    self.coveredScreens = covered
+                    self.layout()
                 }
             }
         }
-        guard covered != coveredScreens else { return }
-        coveredScreens = covered
-        layout()
     }
 
     private func scheduleCoverCheck() {
