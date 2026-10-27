@@ -265,6 +265,7 @@ final class TopBarController {
     /// Screens where Mission Control or App Exposé is open; the bar is hidden there meanwhile.
     private var exposeScreens = Set<CGDirectDisplayID>()
     private var exposeTimer: DispatchSourceTimer?
+    private var dockWatch: DockActivityWatch?
     /// Looks for Mission Control off the main thread, so the check never holds up drawing.
     private let exposeQueue = DispatchQueue(label: "ClearDock.MissionControlWatch", qos: .userInitiated)
     /// Screens showing a full-screen app; the bar steps aside there, as the menu bar does.
@@ -527,6 +528,8 @@ final class TopBarController {
         lockInPicker.close()
         exposeTimer?.cancel()
         exposeTimer = nil
+        dockWatch?.stop()
+        dockWatch = nil
         exposeScreens.removeAll()
         fullScreenScreens.removeAll()
         inBarSpace.removeAll()
@@ -687,14 +690,17 @@ final class TopBarController {
         DockSpaceKeeper.shared.reserveTop(reserved)
     }
 
-    /// Checks a few times a second whether Mission Control or App Exposé is open. macOS doesn't
-    /// announce either, but while one is open it draws a backdrop over each screen. The looking is
-    /// done on its own queue, and only when the windows on screen have changed (Mission Control
-    /// adds its own) does it look closer and tell the bars.
+    /// Watches for Mission Control or App Exposé opening. macOS doesn't announce either, but the
+    /// Dock (which draws them) reports a change as they open and close: that's when it looks, at
+    /// once and as the animation settles. A look every second and a half is the safety net, and
+    /// also notices windows coming and going. The looking is done on its own queue, and only when
+    /// the windows on screen have changed (Mission Control adds its own) does it look closer.
     private func startExposeWatch() {
+        dockWatch?.stop()
+        dockWatch = DockActivityWatch { [weak self] in self?.lookForMissionControl() }
         exposeTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: exposeQueue)
-        timer.schedule(deadline: .now(), repeating: 0.25, leeway: .milliseconds(100))
+        timer.schedule(deadline: .now(), repeating: 1.5, leeway: .milliseconds(500))
         var seen: [UInt] = []
         var seenSet = Set<UInt>()
         timer.setEventHandler { [weak self] in
@@ -716,6 +722,19 @@ final class TopBarController {
         }
         timer.resume()
         exposeTimer = timer
+    }
+
+    /// The Dock changed what it shows: look for Mission Control now, and again as it finishes
+    /// opening or closing.
+    private func lookForMissionControl() {
+        for delay in [0.0, 0.25, 0.6] {
+            exposeQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                let backdrops = MissionControl.backdrops()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.checkExpose(backdrops) }
+                }
+            }
+        }
     }
 
     private func checkExpose(_ backdrops: [CGRect]) {

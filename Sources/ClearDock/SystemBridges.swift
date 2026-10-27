@@ -31,9 +31,16 @@ enum BadgeReader {
         AXUIElementSetMessagingTimeout(dockElement, 0.25)
 
         var result: [String: String] = [:]
+        let wanted = [kAXSubroleAttribute, "AXStatusLabel", kAXURLAttribute] as CFArray
         for list in children(of: dockElement) where string(list, kAXRoleAttribute) == kAXListRole {
-            for item in children(of: list) where string(item, kAXSubroleAttribute) == "AXApplicationDockItem" {
-                guard let label = string(item, "AXStatusLabel"), let url = url(item) else { continue }
+            for item in children(of: list) {
+                // All three in one question to the Dock, rather than one each.
+                var answers: CFArray?
+                guard AXUIElementCopyMultipleAttributeValues(item, wanted, AXCopyMultipleAttributeOptions(rawValue: 0), &answers) == .success,
+                      let values = answers as? [Any], values.count == 3,
+                      values[0] as? String == "AXApplicationDockItem",
+                      let label = values[1] as? String, !label.isEmpty,
+                      let url = (values[2] as? URL)?.standardizedFileURL else { continue }
                 result[url.path] = label
             }
         }
@@ -52,11 +59,6 @@ enum BadgeReader {
         return value as? String
     }
 
-    nonisolated private static func url(_ element: AXUIElement) -> URL? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value) == .success else { return nil }
-        return (value as? URL)?.standardizedFileURL
-    }
 }
 
 /// Hands memory freed after one-off heavy work (loading icons, taking window pictures)
@@ -288,6 +290,78 @@ enum MissionControl {
             let bounds = CGDisplayBounds(display)
             return backdrops.contains { $0.insetBy(dx: -2, dy: -2).contains(bounds.insetBy(dx: 2, dy: 2)) }
         }
+    }
+}
+
+/// Hears the macOS Dock, which draws Mission Control and App Exposé, change what it's showing:
+/// it reports its selection changing as either opens or closes (macOS announces neither). Only a
+/// hint to go and look, so nothing needs checking several times a second. Follows the Dock when it
+/// restarts.
+@MainActor
+final class DockActivityWatch {
+    private let onActivity: @MainActor () -> Void
+    private var observer: AXObserver?
+    private var dockPID: pid_t = 0
+    private var launchToken: NSObjectProtocol?
+
+    init(onActivity: @escaping @MainActor () -> Void) {
+        self.onActivity = onActivity
+        launchToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier == "com.apple.dock" else { return }
+            MainActor.assumeIsolated { self?.attach() }
+        }
+        attach()
+    }
+
+    func stop() {
+        detach()
+        if let launchToken { NSWorkspace.shared.notificationCenter.removeObserver(launchToken) }
+        launchToken = nil
+    }
+
+    private var retries = 0
+
+    private func attach() {
+        guard AXIsProcessTrusted() else { return }
+        // Not listed yet, or not answering yet: Clear Dock often starts just as the Dock restarts
+        // (to hide it), and a Dock that has only just started doesn't take requests for a moment.
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return retry() }
+        guard dock.processIdentifier != dockPID || observer == nil else { return }
+        detach()
+        var created: AXObserver?
+        guard AXObserverCreate(dock.processIdentifier, { _, _, _, refcon in
+            guard let refcon else { return }
+            let watch = Unmanaged<DockActivityWatch>.fromOpaque(refcon).takeUnretainedValue()
+            MainActor.assumeIsolated { watch.onActivity() }
+        }, &created) == .success, let observer = created else { return retry() }
+        let app = AXUIElementCreateApplication(dock.processIdentifier)
+        AXUIElementSetMessagingTimeout(app, 0.25)
+        guard AXObserverAddNotification(observer, app, kAXSelectedChildrenChangedNotification as CFString,
+                                        Unmanaged.passUnretained(self).toOpaque()) == .success else { return retry() }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        self.observer = observer
+        dockPID = dock.processIdentifier
+        retries = 0
+        dockLog.notice("Mission Control: following the Dock")
+    }
+
+    private func retry() {
+        guard launchToken != nil else { return }
+        guard retries < 20 else {
+            return dockLog.notice("Mission Control: the Dock doesn't answer; looking every second and a half instead")
+        }
+        retries += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated { self?.attach() }
+        }
+    }
+
+    private func detach() {
+        if let observer { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes) }
+        observer = nil
+        dockPID = 0
     }
 }
 

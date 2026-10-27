@@ -21,13 +21,18 @@ struct TopBarView: View {
                 // One container for the bar's glass: its pieces are drawn together in one pass, rather
                 // than each on its own, which matters most over a moving wallpaper (redrawn every frame).
                 // No spacing, so neighbouring pieces don't melt into each other.
-                GlassEffectContainer(spacing: 0) {
-                    HStack(spacing: 0) {
-                        row(.left, layout).frame(width: side, alignment: .leading)
-                        Spacer(minLength: 0)
-                        row(.right, layout).frame(width: max(0, side - layout.rightInset), alignment: .trailing)
-                        // Clear of macOS's privacy dot, when it shows.
-                        Color.clear.frame(width: layout.rightInset)
+                let rows = HStack(spacing: 0) {
+                    row(.left, layout).frame(width: side, alignment: .leading)
+                    Spacer(minLength: 0)
+                    row(.right, layout).frame(width: max(0, side - layout.rightInset), alignment: .trailing)
+                    // Clear of macOS's privacy dot, when it shows.
+                    Color.clear.frame(width: layout.rightInset)
+                }
+                Group {
+                    if look.style == .glass {
+                        GlassEffectContainer(spacing: 0) { rows }
+                    } else {
+                        rows
                     }
                 }
                 .padding(.horizontal, 8)
@@ -356,10 +361,42 @@ private struct SoundBars: NSViewRepresentable {
 
     final class BarsView: NSView {
         private var shown: (color: NSColor, height: CGFloat)?
+        private var occlusionToken: NSObjectProtocol?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
             wantsLayer = true
+        }
+
+        /// Paused while its bar can't be seen (stepped aside for Mission Control, a full-screen app
+        /// or a game, or the display asleep), so nothing is drawn for nobody.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let occlusionToken { NotificationCenter.default.removeObserver(occlusionToken) }
+            occlusionToken = nil
+            guard let window else { return }
+            occlusionToken = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                                                    object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.followVisibility() }
+            }
+            followVisibility()
+        }
+
+        private func followVisibility() {
+            guard let layer, let window else { return }
+            let visible = window.occlusionState.contains(.visible) && window.alphaValue > 0.01
+            guard (layer.speed == 0) == visible else { return }
+            if visible {
+                // Carry on from where they stopped.
+                let paused = layer.timeOffset
+                layer.speed = 1
+                layer.timeOffset = 0
+                layer.beginTime = 0
+                layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - paused
+            } else {
+                layer.timeOffset = layer.convertTime(CACurrentMediaTime(), from: nil)
+                layer.speed = 0
+            }
         }
 
         required init?(coder: NSCoder) {
@@ -502,7 +539,10 @@ struct Pill<Content: View>: View {
                 shape.fill(Color.white.opacity(highlighted ? 0.14 : 0.08)).allowsHitTesting(false)
             }
         }
-        .shadow(color: .black.opacity(look.style == .none ? 0.65 : 0.22), radius: look.style == .none ? 2 : 4, y: 1)
+        // Bare text (no background) needs a shadow to read over the wallpaper; a piece with a
+        // background has its own, on its shape alone, so nothing inside it (like the bouncing song
+        // bars) makes the shadow be worked out again.
+        .shadow(color: .black.opacity(look.style == .none ? 0.65 : 0), radius: look.style == .none ? 2 : 0, y: 1)
         .contentShape(shape)
         .onHover { hovering = $0 }
         .onTapGesture { action?() }
@@ -518,12 +558,14 @@ private struct PillBackground: View {
         Group {
             if highlighted {
                 shape.fill(Color(nsColor: look.accent).opacity(0.92))
+                    .shadow(color: .black.opacity(0.22), radius: 4, y: 1)
                     .overlay(shape.strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
             } else if look.style == .none {
                 Color.clear
             } else {
                 // A solid colour (from the wallpaper, or your own), with a fine light edge.
                 shape.fill(Color(nsColor: look.fill))
+                    .shadow(color: .black.opacity(0.22), radius: 4, y: 1)
                     .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
             }
         }
