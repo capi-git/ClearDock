@@ -35,6 +35,7 @@ final class TriggerPanel: OverlayPanel {
         // Catch the pointer even though the strip is effectively invisible.
         backgroundColor = NSColor(white: 0, alpha: 0.01)
         ignoresMouseEvents = false
+        acceptsMouseMovedEvents = true
         contentView = TriggerView(onReveal: onReveal)
     }
 }
@@ -58,10 +59,13 @@ private final class TriggerView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        // Moves too: the pointer may already be resting on the edge when the dock goes, and then
+        // it never "enters" the strip.
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
     }
 
     override func mouseEntered(with event: NSEvent) { onReveal() }
+    override func mouseMoved(with event: NSEvent) { onReveal() }
     override func mouseDown(with event: NSEvent) { onReveal() }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -233,7 +237,17 @@ final class DockController {
 
     /// While the dock should stay on screen, makes sure it is, putting it back if macOS took it off.
     private func keepOnScreen(because reason: String) {
-        guard !autoHides, !shown || !panel.isVisible else { return }
+        guard !autoHides, !sliding else { return }
+        // Up, opaque and at its edge (its length can differ for a moment while an app opens or quits).
+        let target = currentScreen.map { frame(on: $0, visible: true) }
+        let atEdge = target.map { target in
+            switch edge {
+            case .bottom: abs(panel.frame.minY - target.minY) < 1
+            case .left: abs(panel.frame.minX - target.minX) < 1
+            case .right: abs(panel.frame.maxX - target.maxX) < 1
+            }
+        } ?? true
+        guard !(shown && panel.isVisible && panel.alphaValue > 0.9 && atEdge) else { return }
         dockLog.notice("Dock: wasn't on screen though it should be (\(reason, privacy: .public)); showing it again")
         removeTriggers()
         show(on: currentScreen ?? NSScreen.screens.first, animated: false, because: reason)
@@ -444,8 +458,13 @@ final class DockController {
                 MainActor.assumeIsolated { self.slideFinished() }
             })
         } else {
-            panel.setFrame(target, display: true)
-            panel.alphaValue = 1
+            // Through the animator with no duration: that also stops a slide away still under way,
+            // which would otherwise carry on and leave the dock hidden while it thinks it's up.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                panel.animator().setFrame(target, display: true)
+                panel.animator().alphaValue = 1
+            }
         }
     }
 
@@ -529,7 +548,16 @@ final class DockController {
         // Stay up while the pointer is on a window preview.
         if previews.contains(mouse) { return scheduleHide() }
         let nearby = settled.insetBy(dx: -20, dy: -20)
-        if nearby.contains(mouse) || view.isBusy {
+        // Just brought up from further along the edge: stays while the pointer makes its way over,
+        // as long as it keeps low along that edge.
+        let onTheWay = Date().timeIntervalSince(revealedAt) < 1.5 && NSMouseInRect(mouse, screen.frame, false) && {
+            switch edge {
+            case .bottom: mouse.y <= settled.maxY + 20
+            case .left: mouse.x <= settled.maxX + 20
+            case .right: mouse.x >= settled.minX - 20
+            }
+        }()
+        if nearby.contains(mouse) || onTheWay || view.isBusy {
             scheduleHide()
         } else {
             hide(animated: true)
@@ -622,24 +650,47 @@ final class DockController {
         while triggers.count > screens.count {
             triggers.removeLast().orderOut(nil)
         }
-        // A one-point strip along the dock's edge of each screen, as long as the dock.
-        let length = (edge.isVertical ? model.layout.size.height : model.layout.size.width) + 32
+        // A one-point strip along the whole of the dock's edge of each screen, apart from where that
+        // edge meets another screen (the pointer crosses there on its way over).
         for (trigger, screen) in zip(triggers, screens) {
-            let s = screen.frame
-            let rect: NSRect = switch edge {
-            case .bottom: NSRect(x: (s.midX - length / 2).rounded(), y: s.minY, width: length, height: 1)
-            case .left: NSRect(x: s.minX, y: (s.midY - length / 2).rounded(), width: 1, height: length)
-            case .right: NSRect(x: s.maxX - 1, y: (s.midY - length / 2).rounded(), width: 1, height: length)
+            guard let rect = Self.revealStrip(on: screen, edge: edge, among: screens) else {
+                trigger.orderOut(nil)
+                continue
             }
             trigger.setFrame(rect, display: false)
-            // Not where this edge meets another screen: the pointer crosses there on its way over.
-            let beyond = rect.offsetBy(dx: edge == .left ? -1 : edge == .right ? 1 : 0, dy: edge == .bottom ? -1 : 0)
-            let shared = screens.contains { $0 !== screen && $0.frame.intersects(beyond) }
-            if shared {
-                trigger.orderOut(nil)
-            } else if !shown {
-                trigger.orderFrontRegardless()
+            if !shown { trigger.orderFrontRegardless() }
+        }
+    }
+
+    /// The longest stretch of a screen's edge that doesn't meet another screen, as a one-point strip.
+    private static func revealStrip(on screen: NSScreen, edge: DockEdge, among screens: [NSScreen]) -> NSRect? {
+        let s = screen.frame
+        let alongX = edge == .bottom
+        var free: [ClosedRange<CGFloat>] = [alongX ? s.minX...s.maxX : s.minY...s.maxY]
+        for other in screens where other !== screen {
+            let o = other.frame
+            let touches: Bool = switch edge {
+            case .bottom: abs(o.maxY - s.minY) < 1
+            case .left: abs(o.maxX - s.minX) < 1
+            case .right: abs(o.minX - s.maxX) < 1
             }
+            guard touches else { continue }
+            let shared = alongX ? o.minX...o.maxX : o.minY...o.maxY
+            free = free.flatMap { part -> [ClosedRange<CGFloat>] in
+                guard part.overlaps(shared) else { return [part] }
+                var left: [ClosedRange<CGFloat>] = []
+                if shared.lowerBound > part.lowerBound { left.append(part.lowerBound...shared.lowerBound) }
+                if shared.upperBound < part.upperBound { left.append(shared.upperBound...part.upperBound) }
+                return left
+            }
+        }
+        guard let longest = free.max(by: { $0.upperBound - $0.lowerBound < $1.upperBound - $1.lowerBound }),
+              longest.upperBound - longest.lowerBound >= 40 else { return nil }
+        let length = longest.upperBound - longest.lowerBound
+        return switch edge {
+        case .bottom: NSRect(x: longest.lowerBound, y: s.minY, width: length, height: 1)
+        case .left: NSRect(x: s.minX, y: longest.lowerBound, width: 1, height: length)
+        case .right: NSRect(x: s.maxX - 1, y: longest.lowerBound, width: 1, height: length)
         }
     }
 
@@ -648,12 +699,59 @@ final class DockController {
         triggers.removeAll()
     }
 
+    private var pendingReveal: DispatchWorkItem?
+
+    /// The pointer reached the dock's edge of a screen. Where the dock is, it comes straight away;
+    /// further along the edge, once the pointer has stayed there a moment, so brushing past the
+    /// edge doesn't bring it up.
     private func reveal() {
         guard autoHides, !shown else { return }
+        // Not over a game: pushing the pointer to the edge there is usually part of playing (moving
+        // the view about), not reaching for the dock.
+        if let front = NSWorkspace.shared.frontmostApplication, Games.isGame(front.processIdentifier) { return }
         let mouse = NSEvent.mouseLocation
-        let target = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.screens.first
-        show(on: target, animated: true)
+        guard let target = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.screens.first else { return }
+        if alongDock(mouse, on: target) { return revealNow(on: target) }
+        guard pendingReveal == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingReveal = nil
+                guard self.autoHides, !self.shown, self.atEdge(NSEvent.mouseLocation, of: target) else { return }
+                self.revealNow(on: target)
+            }
+        }
+        pendingReveal = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// When the dock was last brought up from the edge.
+    private var revealedAt = Date.distantPast
+
+    private func revealNow(on screen: NSScreen) {
+        pendingReveal?.cancel()
+        pendingReveal = nil
+        revealedAt = Date()
+        show(on: screen, animated: true)
         // Hide again if the pointer moves away without ever reaching the icons.
         scheduleHide()
+    }
+
+    /// Whether the pointer is within the stretch of the edge the dock takes up.
+    private func alongDock(_ point: NSPoint, on screen: NSScreen) -> Bool {
+        let s = screen.frame
+        let half = ((edge.isVertical ? model.layout.size.height : model.layout.size.width) + 32) / 2
+        return edge == .bottom ? abs(point.x - s.midX) <= half : abs(point.y - s.midY) <= half
+    }
+
+    /// Whether the pointer is still right at the dock's edge of `screen`.
+    private func atEdge(_ point: NSPoint, of screen: NSScreen) -> Bool {
+        let s = screen.frame
+        guard NSMouseInRect(point, s, false) else { return false }
+        return switch edge {
+        case .bottom: point.y <= s.minY + 2
+        case .left: point.x <= s.minX + 2
+        case .right: point.x >= s.maxX - 3
+        }
     }
 }
