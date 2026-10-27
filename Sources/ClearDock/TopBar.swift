@@ -78,6 +78,9 @@ struct BarLayout: Equatable {
     /// keeps its own menu bar up behind the bar (some apps, like Microsoft Teams, have it stay up
     /// while they're in front, even though it's set to hide), it would show between the pieces.
     var solidStrip = false
+    /// Room kept at the right end for macOS's microphone, camera or screen recording dot, which it
+    /// draws over everything in the top right corner while the menu bar is hidden.
+    var rightInset: CGFloat = 0
 }
 
 /// Colours taken from an album cover.
@@ -278,6 +281,8 @@ final class TopBarController {
     /// Screens where macOS keeps its menu bar up behind the bar without the pointer being there
     /// (an app in front has it stay up).
     private var menuBarHeldUp = Set<CGDirectDisplayID>()
+    /// How much of each screen's top right corner macOS's privacy dot takes up, while it shows.
+    private var indicatorRoom: [CGDirectDisplayID: CGFloat] = [:]
     /// Bars sliding away from a game right now.
     private var leaving = Set<CGDirectDisplayID>()
     private let popover = BarPopover()
@@ -656,7 +661,8 @@ final class TopBarController {
             }
             let key = sharedDesktops ? "Main" : (screen.displayUUID ?? "Main")
             layouts[String(id)] = BarLayout(width: frame.width, middleGap: gap, desktopsKey: key,
-                                            solidStrip: replacesMenuBar && menuBarHeldUp.contains(id))
+                                            solidStrip: replacesMenuBar && menuBarHeldUp.contains(id),
+                                            rightInset: frame.maxY >= screen.frame.maxY - 1 ? indicatorRoom[id] ?? 0 : 0)
             reserved.append((frame.minY, screen))
         }
         for (id, entry) in panels where !kept.contains(id) {
@@ -690,13 +696,22 @@ final class TopBarController {
         let timer = DispatchSource.makeTimerSource(queue: exposeQueue)
         timer.schedule(deadline: .now(), repeating: 0.25, leeway: .milliseconds(100))
         var seen: [UInt] = []
+        var seenSet = Set<UInt>()
         timer.setEventHandler { [weak self] in
             let numbers = OnScreenWindows.numbers()
             guard numbers != seen || numbers.isEmpty else { return }
             seen = numbers
+            // A window appeared or went (not just a change of order): macOS's own menu bar or its
+            // privacy dot may have come or gone too, which nothing announces.
+            let set = Set(numbers)
+            let appeared = set != seenSet
+            seenSet = set
             let backdrops = MissionControl.backdrops()
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.checkExpose(backdrops) }
+                MainActor.assumeIsolated {
+                    self?.checkExpose(backdrops)
+                    if appeared { self?.checkCoveredSoon() }
+                }
             }
         }
         timer.resume()
@@ -1034,6 +1049,16 @@ final class TopBarController {
         desktopQueue.async { [weak self] in
             var covered = Set<CGDirectDisplayID>()
             let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            // macOS's privacy dot (microphone, camera, screen recording) in a screen's top right corner.
+            var indicators: [CGDirectDisplayID: CGFloat] = [:]
+            for info in windows where info[kCGWindowOwnerName as String] as? String == "Window Server"
+                && info[kCGWindowName as String] as? String == "StatusIndicator" {
+                guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                      let rect = CGRect(dictionaryRepresentation: bounds), rect.width < 80 else { continue }
+                for (id, area) in screens where area.intersects(rect) && rect.minY < area.minY + 12 && rect.midX > area.midX {
+                    indicators[id] = max(indicators[id] ?? 0, (area.maxX - rect.minX + 2).rounded())
+                }
+            }
             // macOS's own menu bar, up along the top of a screen.
             var held = Set<CGDirectDisplayID>()
             let menuLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
@@ -1066,12 +1091,26 @@ final class TopBarController {
                     let reaching = self.holdTimer != nil || self.revealTimer != nil
                     let heldChanged = !reaching && held != self.menuBarHeldUp
                     if heldChanged { self.menuBarHeldUp = held }
-                    guard covered != self.coveredScreens || heldChanged else { return }
+                    let indicatorsChanged = indicators != self.indicatorRoom
+                    if indicatorsChanged { self.indicatorRoom = indicators }
+                    guard covered != self.coveredScreens || heldChanged || indicatorsChanged else { return }
                     self.coveredScreens = covered
                     self.layout()
                 }
             }
         }
+    }
+
+    private var pendingCoverLook: DispatchWorkItem?
+
+    /// A look a moment from now, after a run of windows coming and going has settled.
+    private func checkCoveredSoon() {
+        pendingCoverLook?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.checkCovered() }
+        }
+        pendingCoverLook = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func scheduleCoverCheck() {

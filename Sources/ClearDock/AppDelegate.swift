@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Every call into another app through Accessibility gives up after half a second, rather
         // than the system's six, so an app that's busy or stuck can't freeze Clear Dock with it.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+        DebugSnapshot.start()
         Settings.seedFromSystemDock()
         if Settings.hideSystemDock { SystemDock.hide() }
         controller = DockController()

@@ -25,7 +25,9 @@ struct TopBarView: View {
                     HStack(spacing: 0) {
                         row(.left, layout).frame(width: side, alignment: .leading)
                         Spacer(minLength: 0)
-                        row(.right, layout).frame(width: side, alignment: .trailing)
+                        row(.right, layout).frame(width: max(0, side - layout.rightInset), alignment: .trailing)
+                        // Clear of macOS's privacy dot, when it shows.
+                        Color.clear.frame(width: layout.rightInset)
                     }
                 }
                 .padding(.horizontal, 8)
