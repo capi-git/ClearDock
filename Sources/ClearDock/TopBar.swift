@@ -439,7 +439,9 @@ final class TopBarController {
                 guard let self else { return }
                 let number = self.lockInPicker.windowNumber
                 Task { @MainActor in
-                    await DebugSnapshot.capture(window: number, name: "picker")
+                    if !UserDefaults.standard.bool(forKey: "debug.lockinNoPicture") {
+                        await DebugSnapshot.capture(window: number, name: "picker")
+                    }
                     self.lockInPicker.close()
                 }
             }
