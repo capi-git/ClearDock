@@ -1055,15 +1055,42 @@ final class TopBarController {
         revealTimer = timer
     }
 
+    /// Whether a look at the windows on screen is under way for `checkMenuBarGone`.
+    private var lookingForMenus = false
+
     private func checkMenuBarGone() {
-        let mouse = NSEvent.mouseLocation
-        // Still up where the menu bar is.
-        if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
-           mouse.y > screen.frame.maxY - 60 { return }
+        guard !pointerAtTop() else { return }
         // Stay out of the way for as long as the macOS menu bar is down or one of its menus is open,
         // however long you take. (Five minutes at most, in case macOS ever stops showing either.)
+        guard Date().timeIntervalSince(revealStarted) < 300 else { return menuBarGone() }
+        // The windows are looked at off the main thread, as that's done several times a second.
+        guard !lookingForMenus else { return }
+        lookingForMenus = true
         let heldUp = revealScreen.map(menuBarHeldUp.contains) == true
-        if Date().timeIntervalSince(revealStarted) < 300, Self.menuBarOrMenuShowing(countingMenuBar: !heldUp) { return }
+        let screens = NSScreen.screens.map { Self.topDown($0.frame) }
+        let started = revealStarted
+        desktopQueue.async { [weak self] in
+            let showing = Self.menuBarOrMenuShowing(countingMenuBar: !heldUp, screens: screens)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.lookingForMenus = false
+                    // Back up at the top meanwhile, or already gone (and maybe shown again since).
+                    guard !showing, self.revealTimer != nil, self.revealStarted == started, !self.pointerAtTop() else { return }
+                    self.menuBarGone()
+                }
+            }
+        }
+    }
+
+    /// Still up where the menu bar is.
+    private func pointerAtTop() -> Bool {
+        let mouse = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) else { return false }
+        return mouse.y > screen.frame.maxY - 60
+    }
+
+    private func menuBarGone() {
         revealTimer?.invalidate()
         revealTimer = nil
         revealScreen = nil
@@ -1071,14 +1098,13 @@ final class TopBarController {
         setBarsVisible(true)
     }
 
-    /// Whether a macOS menu bar is down on any screen (unless `countingMenuBar` is off: an app
+    /// Whether a macOS menu bar is down on any of `screens` (unless `countingMenuBar` is off: an app
     /// holds it up, and it won't go), or a menu (from the menu bar or a right-click) is open in any
     /// app, from one look at the windows on screen.
-    private static func menuBarOrMenuShowing(countingMenuBar: Bool = true) -> Bool {
+    nonisolated private static func menuBarOrMenuShowing(countingMenuBar: Bool, screens: [CGRect]) -> Bool {
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         let menuBar = Int(CGWindowLevelForKey(.mainMenuWindow))
         let menu = Int(CGWindowLevelForKey(.popUpMenuWindow))
-        let screens = NSScreen.screens.map { topDown($0.frame) }
         return windows.contains { info in
             let layer = info[kCGWindowLayer as String] as? Int
             if layer == menu { return (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.5 }

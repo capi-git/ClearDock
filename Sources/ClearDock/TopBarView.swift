@@ -658,8 +658,9 @@ enum BarClock {
 }
 
 enum SystemSettings {
-    /// Opens a System Settings page by its identifier.
+    /// Opens a System Settings page by its identifier, without waiting for it to open.
     static func open(_ page: String) {
-        if let url = URL(string: "x-apple.systempreferences:\(page)") { NSWorkspace.shared.open(url) }
+        guard let url = URL(string: "x-apple.systempreferences:\(page)") else { return }
+        NSWorkspace.shared.open(url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
     }
 }

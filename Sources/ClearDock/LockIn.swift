@@ -959,8 +959,8 @@ private final class LockInSession {
     private func settle() {
         // Not while Mission Control is open (it may have opened since this was asked for, before
         // the bar's check noticed): where it shows the windows isn't where they are.
-        guard !LockIn.missionControlOpen, !MissionControl.isShowing else { return }
-        look { [weak self] found in self?.settle(found) }
+        guard !LockIn.missionControlOpen else { return }
+        look(unlessMissionControl: true) { [weak self] found in self?.settle(found) }
     }
 
     private func settle(_ found: [CGWindowID: CGRect]) {
@@ -1212,30 +1212,50 @@ private final class LockInSession {
         looks += 1
         guard numbers != lastLookedAt || numbers.isEmpty || looks % 4 == 0 else { return }
         let mine = Set(panes.map(\.pid))
-        let me = getpid()
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
         let screenArea = screen.map { CGRect(x: $0.frame.minX, y: mainHeight - $0.frame.maxY, width: $0.frame.width, height: $0.frame.height) }
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let space = self.space
+        // The windows on screen are listed off the main thread, as is everything asked of their apps:
+        // macOS can be slow to list them while it's busy, and an app that's just opened slow to answer.
+        arriving = true
+        LockIn.windowQueue.async { [weak self] in
+            let me = getpid()
+            let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let seen = list.compactMap { info -> (pid: pid_t, id: CGWindowID)? in
+                guard (info[kCGWindowLayer as String] as? Int) == 0,
+                      let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me, !mine.contains(pid),
+                      let id = info[kCGWindowNumber as String] as? CGWindowID,
+                      (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                      let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                      let rect = CGRect(dictionaryRepresentation: bounds), rect.width >= 80, rect.height >= 60,
+                      screenArea.map({ $0.intersects(rect) }) ?? true,
+                      WindowSpaces.spaceIDs(of: id) == [space] else { return nil }
+                return (pid, id)
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.sortNewcomers(seen, numbers: numbers, mainHeight: mainHeight) }
+            }
+        }
+    }
+
+    /// Which of the other apps' windows `seen` on the desktop are new to it, and sends those on.
+    private func sortNewcomers(_ seen: [(pid: pid_t, id: CGWindowID)], numbers: [UInt], mainHeight: CGFloat) {
+        guard !ended else { return arriving = false }
         var found: [pid_t: Set<CGWindowID>] = [:]
-        for info in list {
-            guard (info[kCGWindowLayer as String] as? Int) == 0,
-                  let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me, !mine.contains(pid),
-                  !keptApps.contains(pid), !Games.isGame(pid), !BarSettings.lockInAllows(pid),
-                  checkingApp.map({ NSRunningApplication(processIdentifier: pid)?.executableURL == $0 }) ?? true,
-                  let id = info[kCGWindowNumber as String] as? CGWindowID,
-                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
-                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
-                  let rect = CGRect(dictionaryRepresentation: bounds), rect.width >= 80, rect.height >= 60,
-                  screenArea.map({ $0.intersects(rect) }) ?? true,
-                  WindowSpaces.spaceIDs(of: id) == [space] else { continue }
+        for (pid, id) in seen {
+            guard !keptApps.contains(pid), !Games.isGame(pid), !BarSettings.lockInAllows(pid),
+                  checkingApp.map({ NSRunningApplication(processIdentifier: pid)?.executableURL == $0 }) ?? true else { continue }
             // You brought this one back after lock-in put it away: you want it here.
             if putAway.contains(id) { keptWindows.insert(id) }
-            guard !keptWindows.contains(id), !keptApps.contains(pid) else { continue }
+            guard !keptWindows.contains(id) else { continue }
             found[pid, default: []].insert(id)
         }
         // Only a look that found nothing to do counts as done: a window found but not dealt with yet
         // (its app still opening) is looked for again next time.
-        guard !found.isEmpty else { return lastLookedAt = numbers }
+        guard !found.isEmpty else {
+            arriving = false
+            return lastLookedAt = numbers
+        }
         let elsewhere = NSScreen.screens.first { screen in
             screen.displayID != display
                 && WindowSpaces.currentSpaceID(on: screen).map(LockIn.lockedSpaces.contains) != true
@@ -1245,9 +1265,6 @@ private final class LockInSession {
             let room = screen.visibleFrame.insetBy(dx: 40, dy: 40)
             return CGRect(x: room.minX, y: mainHeight - room.maxY, width: room.width, height: room.height)
         }
-        // The apps are asked about their windows, and the windows moved, off the main thread: an
-        // app that's just opened can be slow to answer, and nothing on screen should wait for it.
-        arriving = true
         let work = found.map { (pid: $0.key, ids: $0.value) }
         LockIn.windowQueue.async { [weak self] in
             let arrivals = work.map { Self.deal(with: $0.pid, windows: $0.ids, room: room) }
@@ -1580,10 +1597,13 @@ private final class LockInSession {
     /// answers only once it's done.
     private let paneQueue = DispatchQueue(label: "Clear Dock lock-in", qos: .userInteractive)
 
-    /// Where the windows are now, by window, handed to `then` on the main thread.
-    private func look(_ then: @escaping @MainActor ([CGWindowID: CGRect]) -> Void) {
+    /// Where the windows are now, by window, handed to `then` on the main thread. With
+    /// `unlessMissionControl`, not while Mission Control is open (it may have opened before the
+    /// bar's check noticed): where it shows the windows isn't where they are.
+    private func look(unlessMissionControl: Bool = false, _ then: @escaping @MainActor ([CGWindowID: CGRect]) -> Void) {
         let panes = self.panes.map { (id: $0.id, element: $0.element) }
         paneQueue.async { [weak self] in
+            if unlessMissionControl, MissionControl.isShowing { return }
             var found: [CGWindowID: CGRect] = [:]
             for pane in panes { found[pane.id] = LockIn.frame(of: pane.element) }
             DispatchQueue.main.async {
