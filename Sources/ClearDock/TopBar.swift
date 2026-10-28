@@ -1,6 +1,7 @@
 import AppKit
 import ScreenCaptureKit
 import SwiftUI
+import os
 
 /// How the top bar looks right now, worked out from its settings and the wallpaper.
 struct BarLook: Equatable {
@@ -65,6 +66,19 @@ enum BarLookShare {
     static func look(for screen: NSScreen?) -> BarLook? {
         screen?.displayID.flatMap { looks[$0] } ?? looks.values.first
     }
+}
+
+/// Notes about the bar stepping aside and why, readable with:
+/// log show --predicate 'subsystem == "local.cleardock" AND category == "bar"'
+let barLog = Logger(subsystem: "local.cleardock", category: "bar")
+
+/// Where the top bar sits on each screen (its bottom edge, in the usual bottom-up screen
+/// coordinates) while it's on, even while it has stepped aside for a moment (a game or a full-screen
+/// app in front, Mission Control): for lock-in, which keeps its windows below it, so they don't grow
+/// into the bar's place and stay there when it comes back.
+@MainActor
+enum BarRoom {
+    static var bottoms: [CGDirectDisplayID: CGFloat] = [:]
 }
 
 /// Where a screen's bar puts things: its width, and the room left in the middle for the camera
@@ -290,6 +304,7 @@ final class TopBarController {
     private let popover = BarPopover()
     private let lockIn = LockIn()
     private let lockInPicker = LockInPicker()
+    private let lockInNote = BarNote()
 
     init() {
         nowPlaying.onChange = { [weak self] in
@@ -365,6 +380,11 @@ final class TopBarController {
             self.lockInPicker.show(choices, title: title, look: self.model.look(for: key), below: bottom, on: screen, done: done)
         }
         lockIn.dismissChooser = { [weak self] in self?.lockInPicker.close() }
+        lockIn.notice = { [weak self] screen, text, icon in
+            guard let self, let id = screen.displayID, let bar = self.panels[id]?.panel, bar.isVisible else { return }
+            let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
+            self.lockInNote.show(text, icon: icon, look: self.model.look(for: key), below: bar.frame.minY, on: screen)
+        }
         model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
         model.chooseLockIn = { [weak self] in self?.lockIn.toggle(choosing: true) }
         model.hoverSong = { [weak self] inside in self?.hoverSong(inside) }
@@ -380,7 +400,24 @@ final class TopBarController {
         DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.cleardock.debug.picker"), object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.showPickerForChecking() }
         }
+        // For checking lock-in itself: locks in the windows of the app named, takes a picture, unlocks.
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.cleardock.debug.lockin"), object: nil, queue: .main) { [weak self] note in
+            let pid = (note.object as? String).flatMap { pid_t($0) }
+            MainActor.assumeIsolated { if let pid { self?.lockInForChecking(pid) } }
+        }
         settingsChanged()
+    }
+
+    private func lockInForChecking(_ pid: pid_t) {
+        guard UserDefaults.standard.bool(forKey: "debug.snapshots"), lockIn.lockForChecking(pid: pid) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            MainActor.assumeIsolated {
+                Task { @MainActor in
+                    await DebugSnapshot.captureScreen(name: "lockin")
+                    self?.lockIn.unlockForChecking()
+                }
+            }
+        }
     }
 
     /// Opens the lock-in chooser for the desktop showing, saves a picture of it, and closes it again
@@ -569,6 +606,7 @@ final class TopBarController {
         for (_, entry) in panels { entry.panel.orderOut(nil) }
         panels.removeAll()
         DockSpaceKeeper.shared.reserveTop([])
+        BarRoom.bottoms = [:]
         BarLookShare.publish([:])
         MemoryRelief.soon()
     }
@@ -617,6 +655,7 @@ final class TopBarController {
         var layouts: [String: BarLayout] = [:]
         var reserved: [(bottom: CGFloat, screen: NSScreen)] = []
         var kept = Set<CGDirectDisplayID>()
+        var room: [CGDirectDisplayID: CGFloat] = [:]
         var thin = Set<String>()
         let gameMode = BarSettings.gameMode
 
@@ -624,6 +663,7 @@ final class TopBarController {
             guard let id = screen.displayID else { continue }
             kept.insert(id)
             let frame = barFrame(on: screen, replacesMenuBar: replacesMenuBar)
+            room[id] = frame.minY
             let isNew = panels[id] == nil
             let entry = panels[id] ?? makePanel(for: id)
             let panel = entry.panel
@@ -713,6 +753,7 @@ final class TopBarController {
         }
         backdropsAtTop = replacesMenuBar
         if model.thinScreens != thin { model.thinScreens = thin }
+        BarRoom.bottoms = room
         DockSpaceKeeper.shared.reserveTop(reserved)
     }
 
@@ -774,6 +815,7 @@ final class TopBarController {
         guard open != exposeScreens else { return }
         let opened = open.subtracting(exposeScreens), closed = exposeScreens.subtracting(open)
         exposeScreens = open
+        barLog.notice("Bar: Mission Control \(open.isEmpty ? "closed" : "open", privacy: .public)")
         lockIn.missionControl(open: !open.isEmpty)
         if !opened.isEmpty { popover.hide() }
         for id in opened { exposeChanged(on: id, open: true) }
@@ -806,6 +848,7 @@ final class TopBarController {
             if displays.contains("Main") || displays.contains(screen.displayUUID ?? "") { screens.insert(id) }
         }
         guard screens != fullScreenScreens else { return }
+        barLog.notice("Bar: full-screen app on \(screens.count) screens (was \(self.fullScreenScreens.count))")
         fullScreenScreens = screens
         layout()
     }
@@ -1139,6 +1182,11 @@ final class TopBarController {
                     let indicatorsChanged = indicators != self.indicatorRoom
                     if indicatorsChanged { self.indicatorRoom = indicators }
                     guard covered != self.coveredScreens || heldChanged || indicatorsChanged else { return }
+                    if covered != self.coveredScreens {
+                        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+                        barLog.notice("Bar: covered screens \(covered.count) (was \(self.coveredScreens.count)), with \(front, privacy: .public) in front")
+                    }
+                    if heldChanged { barLog.notice("Bar: macOS menu bar held up on \(held.count) screens") }
                     self.coveredScreens = covered
                     self.layout()
                 }

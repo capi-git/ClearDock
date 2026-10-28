@@ -21,6 +21,20 @@ enum DebugSnapshot {
         }
     }
 
+    /// A picture of the whole main screen, at half size, saved as `cleardock-<name>.png`.
+    static func captureScreen(name: String) async {
+        guard UserDefaults.standard.bool(forKey: "debug.snapshots"), let screen = NSScreen.main, let id = screen.displayID,
+              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+              let display = content.displays.first(where: { $0.displayID == id }) else { return }
+        let config = SCStreamConfiguration()
+        config.width = Int(screen.frame.width / 2)
+        config.height = Int(screen.frame.height / 2)
+        config.showsCursor = false
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, excludingWindows: []), configuration: config),
+              let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cleardock-\(name).png"))
+    }
+
     /// A picture of one of Clear Dock's own windows, saved as `cleardock-<name>.png`.
     static func capture(window number: Int, name: String) async {
         guard UserDefaults.standard.bool(forKey: "debug.snapshots"),

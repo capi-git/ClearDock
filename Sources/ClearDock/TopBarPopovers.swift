@@ -585,6 +585,71 @@ final class LockInPicker {
     }
 }
 
+/// A short note under the bar, gone again after a few seconds: lock-in saying where a window
+/// that opened on a locked-in desktop went. It takes no clicks.
+@MainActor
+final class BarNote {
+    private let panel = PopoverPanel()
+    private var hideWork: DispatchWorkItem?
+
+    func show(_ text: String, icon: NSImage?, look: BarLook, below barBottom: CGFloat, on screen: NSScreen) {
+        panel.ignoresMouseEvents = true
+        panel.setContent(AnyView(BarNoteView(text: text, icon: icon, look: look)))
+        let size = panel.fittingSize
+        let x = (screen.frame.midX - size.width / 2).rounded()
+        panel.setFrame(NSRect(x: x, y: barBottom - 8 - size.height, width: size.width, height: size.height), display: true)
+        if !panel.isVisible {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            BarSpace.add(panel)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                panel.animator().alphaValue = 1
+            }
+        }
+        hideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.fade() }
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
+    private func fade() {
+        let panel = self.panel
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.3
+            panel.animator().alphaValue = 0
+        }, completionHandler: {
+            MainActor.assumeIsolated {
+                panel.orderOut(nil)
+                panel.setContent(nil)
+            }
+        })
+    }
+}
+
+private struct BarNoteView: View {
+    let text: String
+    let icon: NSImage?
+    let look: BarLook
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let icon { Image(nsImage: icon).resizable().frame(width: 18, height: 18) }
+            Text(text).font(.system(size: 12.5, weight: .semibold, design: .rounded)).lineLimit(1)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background {
+            Capsule().fill(Color(nsColor: look.fill.blended(withFraction: 0.62, of: .black) ?? .black))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+        }
+        .padding(2)
+    }
+}
+
 /// Pictures for the lock-in chooser: each window as it looks, and the calm backdrop the windows
 /// will sit on, taken once when it opens (Screen Recording permission is needed; without it the
 /// app icons stand in).

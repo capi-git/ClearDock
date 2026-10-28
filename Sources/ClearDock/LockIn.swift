@@ -1,4 +1,5 @@
 import AppKit
+import os
 import ApplicationServices
 import CoreImage
 import ScreenCaptureKit
@@ -47,6 +48,8 @@ final class LockIn {
     var choose: (_ choices: [Choice], _ title: String, _ screen: NSScreen, _ done: @escaping ([Choice]?) -> Void) -> Void = { _, _, _, done in done(nil) }
     /// Closes the chooser if it's open.
     var dismissChooser: () -> Void = {}
+    /// Shows a short note under the bar on a screen.
+    var notice: (_ screen: NSScreen, _ text: String, _ icon: NSImage?) -> Void = { _, _, _ in }
 
     /// Locked-in desktops, by the window server's id for them.
     private var sessions: [UInt64: LockInSession] = [:]
@@ -116,6 +119,26 @@ final class LockIn {
 
     /// Locks in the desktop: straight away when its windows fit the layout, otherwise (or when
     /// `alwaysChoose` says so) once you've chosen in the picker.
+    /// For checking how lock-in looks: locks in the windows of the app `pid` on the desktop showing
+    /// on the main screen, tucking nothing else away. False if that can't be done.
+    func lockForChecking(pid: pid_t) -> Bool {
+        guard let screen = NSScreen.main, let desktop = Self.currentDesktop(on: screen), sessions[desktop.id] == nil else { return false }
+        let mine = Self.windows(on: desktop).choices.filter { $0.pid == pid }
+        guard !mine.isEmpty else { return false }
+        checkingSpace = desktop.id
+        start(Self.arranged(Array(mine.prefix(3))), of: mine, hiding: [], on: desktop.id, screen: screen)
+        return sessions[desktop.id] != nil
+    }
+
+    /// Unlocks what `lockForChecking` locked in.
+    func unlockForChecking() {
+        guard let space = checkingSpace, let session = sessions[space] else { return }
+        checkingSpace = nil
+        end(session, now: true)
+    }
+
+    private var checkingSpace: UInt64?
+
     /// For checking how the chooser looks: the windows it would offer on the desktop showing on
     /// `screen`, and that desktop's name.
     func choicesForChecking(on screen: NSScreen) -> (choices: [Choice], title: String)? {
@@ -200,6 +223,10 @@ final class LockIn {
             self.end(session)
         }
         session.onPutAway = { [weak self] in self?.saveLeftovers() }
+        session.onNotice = { [weak self, weak session] text, icon in
+            guard let self, let screen = session?.screen else { return }
+            self.notice(screen, text, icon)
+        }
         session.onSendAway = { [weak self, weak session] window in
             guard let self, let session else { return }
             self.sentAway.append((window, session.display))
@@ -251,6 +278,8 @@ final class LockIn {
     private func end(_ session: LockInSession, now: Bool = false) {
         guard sessions[session.space] === session else { return }
         sessions[session.space] = nil
+        // Lock-in is for a while: the windows go back to where they were before it.
+        session.putBack()
         session.finish()
         // Hidden apps come back on their own desktops, wherever you are.
         session.hiddenApps.forEach { NSRunningApplication(processIdentifier: $0)?.unhide() }
@@ -548,6 +577,9 @@ final class LockIn {
 
 }
 
+/// Notes about lock-in, readable with: log show --predicate 'subsystem == "local.cleardock" AND category == "lockin"'
+let lockInLog = Logger(subsystem: "local.cleardock", category: "lockin")
+
 /// One locked-in desktop: its two windows kept side by side (or three: two stacked in a column on
 /// the left, a big one beside them), and the windows tucked away meanwhile.
 @MainActor
@@ -644,6 +676,22 @@ private final class LockInSession {
 
     func involves(_ pid: pid_t) -> Bool { panes.contains { $0.pid == pid } }
 
+    /// Where the windows were before lock-in, to put them back afterwards.
+    private var startingFrames: [CGWindowID: CGRect] = [:]
+
+    /// Puts the windows back where they were before lock-in (any that are still open).
+    func putBack() {
+        for pane in panes where !minimized.contains(pane.id) {
+            guard let frame = startingFrames[pane.id], LockIn.frame(of: pane.element) != nil else { continue }
+            Self.setSize(pane.element, frame.size)
+            Self.setPosition(pane.element, frame.origin)
+            Self.setSize(pane.element, frame.size)
+        }
+    }
+
+    /// Something lock-in did that's worth a word (a window that opened here was sent elsewhere).
+    var onNotice: (_ text: String, _ icon: NSImage?) -> Void = { _, _ in }
+
     /// The one of the two you were last using.
     private var lastUsed = 0
 
@@ -659,6 +707,7 @@ private final class LockInSession {
 
     func begin() {
         if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier { noteInFront(front) }
+        for pane in panes { startingFrames[pane.id] = LockIn.frame(of: pane.element) }
         // First, so it fades in behind the windows as they settle into place.
         updateBackdrop()
         watch()
@@ -735,7 +784,14 @@ private final class LockInSession {
     private var area: CGRect? {
         guard let screen else { return nil }
         let gap = CGFloat(BarSettings.lockInGap)
-        let area = DockSpaceKeeper.shared.freeArea(on: screen).insetBy(dx: gap, dy: gap)
+        var free = DockSpaceKeeper.shared.freeArea(on: screen)
+        // Always below the top bar while it's on, even while it has stepped aside for a moment: the
+        // windows would grow into its place and cover it when it comes back.
+        if let id = screen.displayID, let bottom = BarRoom.bottoms[id] {
+            let line = (NSScreen.screens.first?.frame.height ?? 0) - bottom
+            if free.minY < line { free = CGRect(x: free.minX, y: line, width: free.width, height: max(0, free.maxY - line)) }
+        }
+        let area = free.insetBy(dx: gap, dy: gap)
         return area.width > 240 && area.height > 120 ? area : nil
     }
 
@@ -767,6 +823,7 @@ private final class LockInSession {
         let goals = targets
         for (pane, target) in zip(panes, goals) where !minimized.contains(pane.id) {
             guard let frame = LockIn.frame(of: pane.element), !Self.close(frame, target) else { continue }
+            lockInLog.notice("Lock-in: fitting a window from \(String(describing: frame), privacy: .public) to \(String(describing: target), privacy: .public)")
             // Size, place, and size again: some apps only accept a size that fits where they are.
             Self.setSize(pane.element, target.size)
             Self.setPosition(pane.element, target.origin)
@@ -1057,7 +1114,9 @@ private final class LockInSession {
                 && WindowSpaces.currentSpaceID(on: screen).map(LockIn.lockedSpaces.contains) != true
         }
         var tuckedAny = false, hidAny = false
+        var sent: [NSRunningApplication] = [], moved: [NSRunningApplication] = [], hidden: [NSRunningApplication] = []
         for (pid, ids) in found {
+            let running = NSRunningApplication(processIdentifier: pid)
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.3)
             let windows = (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
@@ -1070,6 +1129,7 @@ private final class LockInSession {
                 } else if BarSettings.lockInHideOthers {
                     hide([pid])
                     hidAny = true
+                    if let running { hidden.append(running) }
                 }
                 continue
             }
@@ -1082,15 +1142,27 @@ private final class LockInSession {
                         Self.setSize(window, CGSize(width: min(frame.width, room.width), height: min(frame.height, room.height)))
                     }
                     Self.setPosition(window, CGPoint(x: room.minX, y: mainHeight - room.maxY))
+                    if let running, !moved.contains(running) { moved.append(running) }
                 } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
                     putAway.insert(id)
                     onSendAway(window)
                     tuckedAny = true
+                    if let running, !sent.contains(running) { sent.append(running) }
                 }
             }
         }
         // An app whose window was just tucked away is still the one in front: go back to the two.
         if tuckedAny { raiseLastUsed() }
+        if let app = sent.first {
+            onNotice(sent.count == 1 ? "\(app.localizedName ?? "That app") will open on your next desktop"
+                                     : "\(sent.count) apps will open on your next desktop", app.icon)
+        } else if let app = moved.first {
+            onNotice(moved.count == 1 ? "Moved \(app.localizedName ?? "that app") to your other screen"
+                                      : "Moved \(moved.count) apps to your other screen", app.icon)
+        } else if let app = hidden.first {
+            onNotice(hidden.count == 1 ? "Hid \(app.localizedName ?? "that app") until you unlock"
+                                       : "Hid \(hidden.count) apps until you unlock", app.icon)
+        }
         if tuckedAny || hidAny { onPutAway() }
     }
 
