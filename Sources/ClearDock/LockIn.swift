@@ -1,5 +1,7 @@
 import AppKit
 import ApplicationServices
+import CoreImage
+import ScreenCaptureKit
 
 /// Lock-in mode: the desktop you're on, given over to two windows side by side (or, with three
 /// turned on, two stacked in a column on the left and a big one beside them), with the wallpaper
@@ -74,7 +76,7 @@ final class LockIn {
 
     /// Locks in the desktop you're on, or unlocks it if it's locked in. While you're choosing the
     /// two windows, closes the chooser instead.
-    func toggle() {
+    func toggle(choosing alwaysChoose: Bool = false) {
         if choosing != nil { return dismissChooser() }
         guard !starting else { return }
         let mouse = NSEvent.mouseLocation
@@ -92,7 +94,7 @@ final class LockIn {
             MainActor.assumeIsolated {
                 guard let self, self.starting else { return }
                 self.starting = false
-                self.lock(desktop, on: screen)
+                self.lock(desktop, on: screen, alwaysChoose: alwaysChoose)
                 self.onChange()
             }
         }
@@ -112,32 +114,31 @@ final class LockIn {
         saveLeftovers()
     }
 
-    private func lock(_ desktop: Desktop, on screen: NSScreen) {
+    /// Locks in the desktop: straight away when its windows fit the layout, otherwise (or when
+    /// `alwaysChoose` says so) once you've chosen in the picker.
+    private func lock(_ desktop: Desktop, on screen: NSScreen, alwaysChoose: Bool = false) {
         guard AXIsProcessTrusted() else {
             Self.explain("Lock-in needs Accessibility permission",
                          "Turn on Clear Dock in Privacy & Security > Accessibility, then click Lock In again.")
             return SystemSettings.open("com.apple.preference.security?Privacy_Accessibility")
         }
         let (windows, apart) = Self.windows(on: desktop)
-        // Apps left alone don't count for two locking in straight away (one is usually just playing
-        // music alongside); with three, they do, as one of them may well be one of the three.
-        let counted = BarSettings.lockInThree ? windows : windows.filter { !$0.leftAlone }
-        var apps: [pid_t] = []
-        for window in counted where !apps.contains(window.pid) { apps.append(window.pid) }
-        let fronts = apps.compactMap { pid in counted.first { $0.pid == pid } }
-        let three = BarSettings.lockInThree
-        if windows.count < 2 {
-            return Self.explain("Lock-in needs two windows on this desktop", "Open the apps you want here, then click Lock In.")
+        guard !windows.isEmpty else {
+            return Self.explain("Lock-in needs a window on this desktop", "Open the apps you want here, then click Lock In.")
         }
-        if three && (counted.count == 3 || apps.count == 3) {
-            // The front window of each app: the widest goes on the right, the other two stack in
-            // the order they're in now.
-            return start(Self.stacked(counted.count == 3 ? counted : fronts), of: windows, hiding: apart, on: desktop.id, screen: screen)
+        let layout = BarSettings.lockInLayout
+        // Apps left alone (usually just playing music alongside) only count when they're needed to
+        // fill the layout.
+        var pool = windows.filter { !$0.leftAlone }
+        if pool.count < min(layout, windows.count) { pool = windows }
+        if pool.count <= layout, !alwaysChoose || windows.count == 1 {
+            // Just as many as the layout takes, or fewer: those, straight away.
+            return start(Self.arranged(pool), of: windows, hiding: apart, on: desktop.id, screen: screen)
         }
-        if counted.count == 2 || apps.count == 2 || windows.count == 2 {
-            // Each stays on the side it's on now. (Just two windows, one of an app left alone: those two.)
-            let two = counted.count == 2 ? counted : apps.count == 2 ? fronts : windows
-            return start(two.sorted { $0.frame.midX < $1.frame.midX }, of: windows, hiding: apart, on: desktop.id, screen: screen)
+        let fronts = Self.frontWindowOfEachApp(pool)
+        if fronts.count == layout, !alwaysChoose {
+            // That many apps: the front window of each.
+            return start(Self.arranged(fronts), of: windows, hiding: apart, on: desktop.id, screen: screen)
         }
         do {
             choosing = desktop.id
@@ -153,16 +154,31 @@ final class LockIn {
         }
     }
 
-    /// Three windows in their places: the top of the stack, its bottom, then the big one.
-    private static func stacked(_ three: [Choice]) -> [Choice] {
-        guard three.count == 3, let big = three.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else { return three }
-        return three.filter { $0.id != big.id }.sorted { $0.frame.minY < $1.frame.minY } + [big]
+    /// Windows in their places, going by where they are now: two side by side stay on the side
+    /// they're on; of three, the biggest goes on the right and the other two stack in the order
+    /// they're in now.
+    static func arranged(_ windows: [Choice]) -> [Choice] {
+        switch windows.count {
+        case 2:
+            return windows.sorted { $0.frame.midX < $1.frame.midX }
+        case 3:
+            guard let big = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else { return windows }
+            return windows.filter { $0.id != big.id }.sorted { $0.frame.minY < $1.frame.minY } + [big]
+        default:
+            return windows
+        }
     }
 
-    /// Locks in two (or three) of the desktop's windows; the rest of `all` are tucked away (apart
-    /// from apps left alone), and the apps in `apart` hidden, if that's on.
+    /// The front-most window of each app, in the order the apps come (front-most first).
+    static func frontWindowOfEachApp(_ windows: [Choice]) -> [Choice] {
+        var seen = Set<pid_t>()
+        return windows.filter { seen.insert($0.pid).inserted }
+    }
+
+    /// Locks in one, two or three of the desktop's windows; the rest of `all` are tucked away
+    /// (apart from apps left alone), and the apps in `apart` hidden, if that's on.
     private func start(_ picked: [Choice], of all: [Choice], hiding apart: Set<pid_t>, on space: UInt64, screen: NSScreen) {
-        guard picked.count == 2 || picked.count == 3, Set(picked.map(\.id)).count == picked.count,
+        guard (1...3).contains(picked.count), Set(picked.map(\.id)).count == picked.count,
               let display = screen.displayID, sessions[space] == nil else { return }
         restoreWaiting(on: space)
         let session = LockInSession(space: space, display: display,
@@ -204,6 +220,7 @@ final class LockIn {
     /// A bar setting changed. Only a different gap moves the windows; the glow setting only
     /// redraws round them, and anything else (the clock, a desktop's name) changes neither.
     func settingsChanged() {
+        for session in sessions.values { session.updateBackdrop() }
         let now = (gap: BarSettings.lockInGap, border: BarSettings.lockInBorder)
         defer { appliedSettings = now }
         guard let before = appliedSettings else { return }
@@ -634,6 +651,8 @@ private final class LockInSession {
 
     func begin() {
         if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier { noteInFront(front) }
+        // First, so it fades in behind the windows as they settle into place.
+        updateBackdrop()
         watch()
         fit()
         // Then make room for an app that wouldn't go as narrow as its share.
@@ -650,6 +669,8 @@ private final class LockInSession {
         pendingSettle?.cancel()
         overlay?.finish()
         overlay = nil
+        backdrop?.finish()
+        backdrop = nil
         for (_, observer) in observers {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         }
@@ -680,7 +701,23 @@ private final class LockInSession {
 
     func refit() {
         guard !ended, !dragging else { return }
+        if let screen { backdrop?.cover(screen) }
         fit()
+    }
+
+    /// The calm picture behind the windows (see `CalmBackdrop`).
+    private var backdrop: CalmBackdrop?
+
+    /// Puts up or takes down the calm backdrop, as the setting says. It's made on the desktop
+    /// showing, so only while this one is (otherwise when you next come back to it).
+    func updateBackdrop() {
+        guard !ended else { return }
+        if !BarSettings.lockInCalmBackdrop {
+            backdrop?.finish()
+            backdrop = nil
+        } else if backdrop == nil, showing, let screen {
+            backdrop = CalmBackdrop(covering: screen)
+        }
     }
 
     // MARK: Keeping them side by side
@@ -702,6 +739,7 @@ private final class LockInSession {
             return Self.stack(in: area, gap: gap, column: ((area.width - gap) * CGFloat(BarSettings.lockInStackColumn)).rounded(),
                               top: ((area.height - gap) * CGFloat(BarSettings.lockInStackRows)).rounded())
         }
+        if panes.count == 1 { return [area] }
         let left = ((area.width - gap) * CGFloat(BarSettings.lockInSplit)).rounded()
         return [
             CGRect(x: area.minX, y: area.minY, width: left, height: area.height),
@@ -742,7 +780,8 @@ private final class LockInSession {
             settleStack(frames, in: area)
             return fit()
         }
-        guard panes.count == 2 else { return }
+        // Just one: it has the whole space, and goes back to it if moved.
+        guard panes.count == 2 else { return fit() }
         let goals = targets
         let left = frames[0], right = frames[1]
         let gap = CGFloat(BarSettings.lockInGap)
@@ -1128,10 +1167,16 @@ private final class LockInSession {
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
         func flipped(_ rect: CGRect) -> NSRect { NSRect(x: rect.minX, y: mainHeight - rect.maxY, width: rect.width, height: rect.height) }
         if BarSettings.lockInBorder {
-            let colour = accent()
+            // Softer against the calm backdrop, which already sets the windows apart.
+            let colour = backdrop != nil ? accent().withAlphaComponent(0.6) : accent()
             for (glow, frame) in zip(glows, frames) { glow.show(around: flipped(frame), color: colour) }
         } else {
             glows.forEach { $0.hide() }
+        }
+        // With just one window there's no edge between.
+        guard panes.count > 1 else {
+            divider.orderOut(nil)
+            return rowDivider.orderOut(nil)
         }
         // The edges, a little over each window, so they're easy to take hold of.
         let overlap = DividerPanel.overlap
@@ -1159,6 +1204,7 @@ private final class LockInSession {
     func showDecorationsAgain() {
         // Not under an edge being dragged: the drag draws its own, and puts these back when it ends.
         guard !dragging else { return }
+        updateBackdrop()
         updateDecorations(knownFrames)
     }
 
@@ -1273,6 +1319,93 @@ final class WindowMover: @unchecked Sendable {
     private func setPosition(_ point: CGPoint) {
         var point = point
         if let value = AXValueCreate(.cgPoint, &point) { AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value) }
+    }
+}
+
+/// Behind a locked-in desktop's windows: a still, softly blurred and dimmed picture of the
+/// wallpaper, over the wallpaper itself and the desktop's icons, so a moving wallpaper doesn't
+/// pull the eye (and macOS needn't keep drawing what's under it). It stays on the locked-in
+/// desktop only, out of Mission Control, takes no clicks, and goes when the desktop is unlocked.
+@MainActor
+final class CalmBackdrop {
+    private let panel: NSPanel
+    private let picture = CALayer()
+    private var gone = false
+
+    init(covering screen: NSScreen) {
+        panel = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = true
+        panel.backgroundColor = NSColor(white: 0.06, alpha: 1)
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        // Just above the desktop's icons, below every app's windows.
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+        // On the desktop it's shown on only, and left out of Mission Control.
+        panel.collectionBehavior = [.transient, .ignoresCycle]
+        panel.isReleasedWhenClosed = false
+        let view = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        view.wantsLayer = true
+        picture.frame = view.bounds
+        picture.contentsGravity = .resizeAspectFill
+        picture.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        view.layer?.addSublayer(picture)
+        panel.contentView = view
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        let displayID = screen.displayID
+        let size = CGSize(width: (screen.frame.width / 3).rounded(), height: (screen.frame.height / 3).rounded())
+        Task { @MainActor [weak self] in
+            let image = await Self.calmPicture(display: displayID, size: size)
+            guard let self, !self.gone else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.picture.contents = image
+            CATransaction.commit()
+            let panel = self.panel
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.45
+                panel.animator().alphaValue = 1
+            }, completionHandler: nil)
+        }
+    }
+
+    /// Follows the screen if it changes size.
+    func cover(_ screen: NSScreen) {
+        if panel.frame != screen.frame { panel.setFrame(screen.frame, display: false) }
+    }
+
+    func finish() {
+        gone = true
+        let panel = self.panel
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            panel.animator().alphaValue = 0
+        } completionHandler: {
+            MainActor.assumeIsolated { panel.close() }
+        }
+    }
+
+    /// The wallpaper as it looks (a live one included, as it is right now), small, blurred and dimmed.
+    nonisolated private static func calmPicture(display: CGDirectDisplayID?, size: CGSize) async -> CGImage? {
+        guard CGPreflightScreenCaptureAccess(),
+              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+              let display = content.displays.first(where: { $0.displayID == display }) ?? content.displays.first else { return nil }
+        // Only the wallpaper: everything above it (the desktop's icons, every window) is left out.
+        let wallpaperLevel = Int(CGWindowLevelForKey(.desktopWindow))
+        let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer > wallpaperLevel })
+        let config = SCStreamConfiguration()
+        config.width = Int(size.width)
+        config.height = Int(size.height)
+        config.showsCursor = false
+        guard let still = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else { return nil }
+        let image = CIImage(cgImage: still)
+        let softened = image.clampedToExtent()
+            .applyingGaussianBlur(sigma: 14)
+            .cropped(to: image.extent)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.8, kCIInputBrightnessKey: -0.18])
+            .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -1.1])
+        return CIContext(options: [.cacheIntermediates: false]).createCGImage(softened, from: image.extent)
     }
 }
 

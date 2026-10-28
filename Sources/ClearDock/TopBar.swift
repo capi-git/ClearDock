@@ -146,6 +146,7 @@ final class TopBarModel {
     @ObservationIgnored var goToDesktop: (Desktop) -> Void = { _ in }
     @ObservationIgnored var hoverSong: (Bool) -> Void = { _ in }
     @ObservationIgnored var toggleLockIn: () -> Void = {}
+    @ObservationIgnored var chooseLockIn: () -> Void = {}
 
     /// The song's look: tinted with the album cover's colours, when that's on.
     func songLook(_ base: BarLook) -> BarLook {
@@ -365,6 +366,7 @@ final class TopBarController {
         }
         lockIn.dismissChooser = { [weak self] in self?.lockInPicker.close() }
         model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
+        model.chooseLockIn = { [weak self] in self?.lockIn.toggle(choosing: true) }
         model.hoverSong = { [weak self] inside in self?.hoverSong(inside) }
         model.hide = { kind in
             BarSettings.items = BarSettings.items.map { $0.kind == kind ? BarItem(kind: $0.kind, side: $0.side, isOn: false) : $0 }

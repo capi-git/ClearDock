@@ -265,10 +265,21 @@ enum BarSettings {
         set { defaults.set(newValue, forKey: "lockIn.split") }
     }
 
-    /// Three windows instead of two: two stacked in a column on the left and a big one beside them.
-    static var lockInThree: Bool {
-        get { defaults.bool(forKey: "lockIn.three") }
-        set { defaults.set(newValue, forKey: "lockIn.three") }
+    /// How many windows lock-in gives the desktop to: one, two side by side, or three (two stacked
+    /// in a column on the left and a big one beside them). From before, three windows on or off.
+    static var lockInLayout: Int {
+        get {
+            if let saved = defaults.object(forKey: "lockIn.layout") as? Int { return min(3, max(1, saved)) }
+            return defaults.bool(forKey: "lockIn.three") ? 3 : 2
+        }
+        set { defaults.set(min(3, max(1, newValue)), forKey: "lockIn.layout") }
+    }
+
+    /// A still, softened picture of the wallpaper behind the locked-in windows, over the wallpaper
+    /// itself (moving or not) and the desktop's icons.
+    static var lockInCalmBackdrop: Bool {
+        get { defaults.object(forKey: "lockIn.calmBackdrop") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "lockIn.calmBackdrop") }
     }
 
     /// With three: how much of the width the stacked column gets.

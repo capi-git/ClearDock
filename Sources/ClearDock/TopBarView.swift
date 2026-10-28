@@ -281,10 +281,17 @@ private struct LockInPill: View {
         }
         .contextMenu {
             Button(started != nil ? "Unlock This Desktop" : "Lock In This Desktop") { model.toggleLockIn() }
-            Toggle("Three Windows", isOn: Binding(get: { BarSettings.lockInThree }, set: { on in
-                BarSettings.lockInThree = on
+            if started == nil {
+                Button("Choose Windows…") { model.chooseLockIn() }
+            }
+            Picker("Layout", selection: Binding(get: { BarSettings.lockInLayout }, set: { layout in
+                BarSettings.lockInLayout = layout
                 NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
-            }))
+            })) {
+                Text("One App").tag(1)
+                Text("Two Side by Side").tag(2)
+                Text("Three, Two Stacked").tag(3)
+            }
             Divider()
             Button("Hide Lock In") { model.hide(.lockIn) }
             BarSettingsButton()
