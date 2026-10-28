@@ -380,10 +380,10 @@ final class TopBarController {
             self.lockInPicker.show(choices, title: title, look: self.model.look(for: key), below: bottom, on: screen, done: done)
         }
         lockIn.dismissChooser = { [weak self] in self?.lockInPicker.close() }
-        lockIn.notice = { [weak self] screen, text, icon in
+        lockIn.notice = { [weak self] screen, text, icon, keep in
             guard let self, let id = screen.displayID, let bar = self.panels[id]?.panel, bar.isVisible else { return }
             let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
-            self.lockInNote.show(text, icon: icon, look: self.model.look(for: key), below: bar.frame.minY, on: screen)
+            self.lockInNote.show(text, icon: icon, look: self.model.look(for: key), below: bar.frame.minY, on: screen, keep: keep)
         }
         model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
         model.chooseLockIn = { [weak self] in self?.lockIn.toggle(choosing: true) }
@@ -410,13 +410,13 @@ final class TopBarController {
 
     private func lockInForChecking(_ pid: pid_t) {
         guard UserDefaults.standard.bool(forKey: "debug.snapshots"), lockIn.lockForChecking(pid: pid) else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            MainActor.assumeIsolated {
-                Task { @MainActor in
-                    await DebugSnapshot.captureScreen(name: "lockin")
-                    self?.lockIn.unlockForChecking()
-                }
-            }
+        // Locked in for `debug.lockinSeconds` (2.5 unless set), with a picture taken 2.5 seconds in.
+        let seconds = max(2.5, UserDefaults.standard.double(forKey: "debug.lockinSeconds"))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            Task { @MainActor in await DebugSnapshot.captureScreen(name: "lockin") }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.5) { [weak self] in
+            MainActor.assumeIsolated { self?.lockIn.unlockForChecking() }
         }
     }
 

@@ -586,15 +586,25 @@ final class LockInPicker {
 }
 
 /// A short note under the bar, gone again after a few seconds: lock-in saying where a window
-/// that opened on a locked-in desktop went. It takes no clicks.
+/// that opened on a locked-in desktop went. When it can be undone, a button keeps the window
+/// here instead, and the note waits while the pointer is over it.
 @MainActor
 final class BarNote {
     private let panel = PopoverPanel()
     private var hideWork: DispatchWorkItem?
 
-    func show(_ text: String, icon: NSImage?, look: BarLook, below barBottom: CGFloat, on screen: NSScreen) {
-        panel.ignoresMouseEvents = true
-        panel.setContent(AnyView(BarNoteView(text: text, icon: icon, look: look)))
+    init() {
+        panel.onEnter = { [weak self] in self?.hideWork?.cancel() }
+        panel.onExit = { [weak self] in self?.fade(after: 1.5) }
+    }
+
+    func show(_ text: String, icon: NSImage?, look: BarLook, below barBottom: CGFloat, on screen: NSScreen, keep: (() -> Void)? = nil) {
+        panel.ignoresMouseEvents = keep == nil
+        let action = keep.map { keep in { [weak self] in
+            keep()
+            self?.fade(after: 0)
+        } }
+        panel.setContent(AnyView(BarNoteView(text: text, icon: icon, look: look, keep: action)))
         let size = panel.fittingSize
         let x = (screen.frame.midX - size.width / 2).rounded()
         panel.setFrame(NSRect(x: x, y: barBottom - 8 - size.height, width: size.width, height: size.height), display: true)
@@ -607,15 +617,21 @@ final class BarNote {
                 panel.animator().alphaValue = 1
             }
         }
+        // Longer with a button, to give time to reach for it.
+        fade(after: keep == nil ? 3 : 6)
+    }
+
+    private func fade(after delay: TimeInterval) {
         hideWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.fade() }
         }
         hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func fade() {
+        hideWork = nil
         let panel = self.panel
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.3
@@ -633,15 +649,31 @@ private struct BarNoteView: View {
     let text: String
     let icon: NSImage?
     let look: BarLook
+    let keep: (() -> Void)?
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 8) {
             if let icon { Image(nsImage: icon).resizable().frame(width: 18, height: 18) }
             Text(text).font(.system(size: 12.5, weight: .semibold, design: .rounded)).lineLimit(1)
+            if let keep {
+                Button(action: keep) {
+                    Text("Keep here")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.white.opacity(hovering ? 0.26 : 0.16)))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
+                .padding(.leading, 2)
+            }
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.leading, 14)
+        .padding(.trailing, keep == nil ? 14 : 6)
+        .padding(.vertical, keep == nil ? 8 : 5)
         .background {
             Capsule().fill(Color(nsColor: look.fill.blended(withFraction: 0.62, of: .black) ?? .black))
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.1), lineWidth: 1))

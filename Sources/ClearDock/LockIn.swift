@@ -49,7 +49,8 @@ final class LockIn {
     /// Closes the chooser if it's open.
     var dismissChooser: () -> Void = {}
     /// Shows a short note under the bar on a screen.
-    var notice: (_ screen: NSScreen, _ text: String, _ icon: NSImage?) -> Void = { _, _, _ in }
+    /// A note under the bar on `screen`, with a button that does `keep` when there's one.
+    var notice: (_ screen: NSScreen, _ text: String, _ icon: NSImage?, _ keep: (() -> Void)?) -> Void = { _, _, _, _ in }
 
     /// Locked-in desktops, by the window server's id for them.
     private var sessions: [UInt64: LockInSession] = [:]
@@ -125,8 +126,8 @@ final class LockIn {
         guard !mine.isEmpty else { return false }
         checkingSpace = desktop.id
         start(Self.arranged(Array(mine.prefix(3))), of: mine, hiding: [], on: desktop.id, screen: screen)
-        // Your own windows opening meanwhile stay where they are.
-        sessions[desktop.id]?.leavesOthersAlone = true
+        // Only another copy of the same app opening meanwhile is dealt with; your own windows stay put.
+        sessions[desktop.id]?.checkingApp = NSRunningApplication(processIdentifier: pid)?.executableURL
         return sessions[desktop.id] != nil
     }
 
@@ -225,9 +226,15 @@ final class LockIn {
             self.end(session)
         }
         session.onPutAway = { [weak self] in self?.saveLeftovers() }
-        session.onNotice = { [weak self, weak session] text, icon in
+        session.onNotice = { [weak self, weak session] text, icon, keep in
             guard let self, let screen = session?.screen else { return }
-            self.notice(screen, text, icon)
+            self.notice(screen, text, icon, keep)
+        }
+        session.onKeep = { [weak self] windows in
+            guard let self else { return }
+            self.sentAway.removeAll { entry in windows.contains { CFEqual($0, entry.window) } }
+            self.updateWatching()
+            self.saveLeftovers()
         }
         session.onSendAway = { [weak self, weak session] window in
             guard let self, let session else { return }
@@ -610,6 +617,8 @@ private final class LockInSession {
     var onPutAway: () -> Void = {}
     /// A window that opened on the desktop was sent away, to come back on a desktop that isn't locked in.
     var onSendAway: (AXUIElement) -> Void = { _ in }
+    /// Windows sent away that you've asked to keep here after all.
+    var onKeep: ([AXUIElement]) -> Void = { _ in }
 
     /// Left, then right, each with what moves it; or, with three, the top of the stack, its bottom,
     /// then the big one.
@@ -696,7 +705,7 @@ private final class LockInSession {
     }
 
     /// Something lock-in did that's worth a word (a window that opened here was sent elsewhere).
-    var onNotice: (_ text: String, _ icon: NSImage?) -> Void = { _, _ in }
+    var onNotice: (_ text: String, _ icon: NSImage?, _ keep: (() -> Void)?) -> Void = { _, _, _ in }
 
     /// The one of the two you were last using.
     private var lastUsed = 0
@@ -749,9 +758,18 @@ private final class LockInSession {
     }
 
     func tuck(_ windows: [AXUIElement]) {
+        var tried: [(window: AXUIElement, pid: pid_t)] = []
         for window in windows where AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
             tucked.append(window)
             if let id = AppWindowList.windowID(of: window) { putAway.insert(id) }
+            var pid: pid_t = 0
+            if AXUIElementGetPid(window, &pid) == .success { tried.append((window, pid)) }
+        }
+        // Those that can't be minimized go with their app, hidden.
+        afterMinimizing(tried) { [weak self] stuck in
+            guard let self, !stuck.isEmpty else { return }
+            self.hide(Set(stuck.map(\.pid)))
+            self.onPutAway()
         }
     }
 
@@ -761,8 +779,9 @@ private final class LockInSession {
     /// Windows, and apps (lock-in hid them, as it can't see their windows), you brought back.
     private var keptWindows = Set<CGWindowID>()
     private var keptApps = Set<pid_t>()
-    /// Only for checking lock-in's look: other apps' windows opening on the desktop are left be.
-    var leavesOthersAlone = false
+    /// Only for checking lock-in: windows opening on the desktop are dealt with only for copies of
+    /// the app at this location.
+    var checkingApp: URL?
 
     func refit() {
         guard !ended, !dragging else { return }
@@ -1115,7 +1134,7 @@ private final class LockInSession {
     /// between screens), or else the next one you go to on this screen (macOS doesn't let apps move
     /// windows between desktops, so it's minimized until you get there, and comes back there).
     func moveNewcomers() {
-        guard !ended, !dragging, showing, !leavesOthersAlone else { return }
+        guard !ended, !dragging, showing else { return }
         // Nothing on screen has changed since the last look: nothing new can have opened. (Every
         // fourth time it looks anyway, for a window that was still fading in or growing then.)
         let numbers = OnScreenWindows.numbers().sorted()
@@ -1131,6 +1150,7 @@ private final class LockInSession {
             guard (info[kCGWindowLayer as String] as? Int) == 0,
                   let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me, !mine.contains(pid),
                   !keptApps.contains(pid), !Games.isGame(pid), !BarSettings.lockInAllows(pid),
+                  checkingApp.map({ NSRunningApplication(processIdentifier: pid)?.executableURL == $0 }) ?? true,
                   let id = info[kCGWindowNumber as String] as? CGWindowID,
                   (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
@@ -1150,7 +1170,8 @@ private final class LockInSession {
                 && WindowSpaces.currentSpaceID(on: screen).map(LockIn.lockedSpaces.contains) != true
         }
         var tuckedAny = false, hidAny = false
-        var sent: [NSRunningApplication] = [], moved: [NSRunningApplication] = [], hidden: [NSRunningApplication] = []
+        var moved: [NSRunningApplication] = [], hidden: [NSRunningApplication] = []
+        var sentWindows: [(window: AXUIElement, pid: pid_t)] = []
         for (pid, ids) in found {
             let running = NSRunningApplication(processIdentifier: pid)
             let app = AXUIElementCreateApplication(pid)
@@ -1182,24 +1203,93 @@ private final class LockInSession {
                 } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
                     putAway.insert(id)
                     onSendAway(window)
+                    sentWindows.append((window, pid))
                     tuckedAny = true
-                    if let running, !sent.contains(running) { sent.append(running) }
                 }
             }
         }
         // An app whose window was just tucked away is still the one in front: go back to the two.
         if tuckedAny { raiseLastUsed() }
-        if let app = sent.first {
-            onNotice(sent.count == 1 ? "\(app.localizedName ?? "That app") will open on your next desktop"
-                                     : "\(sent.count) apps will open on your next desktop", app.icon)
+        if tuckedAny || hidAny { onPutAway() }
+        afterMinimizing(sentWindows) { [weak self] stuck in
+            guard let self else { return }
+            var sent = sentWindows, hidden = hidden
+            if !stuck.isEmpty {
+                self.onKeep(stuck.map(\.window))
+                let pids = Set(stuck.map(\.pid))
+                if BarSettings.lockInHideOthers {
+                    // Their apps are hidden instead.
+                    self.hide(pids)
+                    sent.removeAll { pids.contains($0.pid) }
+                    for pid in pids {
+                        if let app = NSRunningApplication(processIdentifier: pid), !hidden.contains(app) { hidden.append(app) }
+                    }
+                    self.onPutAway()
+                } else {
+                    for (window, _) in stuck { if let id = AppWindowList.windowID(of: window) { self.keptWindows.insert(id) } }
+                    sent.removeAll { entry in stuck.contains { CFEqual($0.window, entry.window) } }
+                }
+            }
+            self.tell(sent: sent, moved: moved, hidden: hidden)
+        }
+    }
+
+    /// Some windows can't be minimized: macOS says it's done, and nothing happens. A moment later
+    /// (minimizing takes that long to show), `then` is given those still showing, which no longer
+    /// count as put away.
+    private func afterMinimizing(_ windows: [(window: AXUIElement, pid: pid_t)],
+                                 then: @escaping ([(window: AXUIElement, pid: pid_t)]) -> Void) {
+        guard !windows.isEmpty else { return then([]) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.ended else { return }
+                let stuck = windows.filter { (LockIn.attribute($0.window, kAXMinimizedAttribute) as? Bool) != true }
+                for (window, _) in stuck {
+                    if let id = AppWindowList.windowID(of: window) { self.putAway.remove(id) }
+                }
+                then(stuck)
+            }
+        }
+    }
+
+    /// Says under the bar what was just done with windows that opened here, with a button that
+    /// undoes it, for an app you opened on purpose.
+    private func tell(sent: [(window: AXUIElement, pid: pid_t)], moved: [NSRunningApplication], hidden: [NSRunningApplication]) {
+        var apps: [NSRunningApplication] = []
+        for (_, pid) in sent {
+            if let app = NSRunningApplication(processIdentifier: pid), !apps.contains(app) { apps.append(app) }
+        }
+        let keep: () -> Void = { [weak self] in self?.keepHere(sent, apps: hidden) }
+        if let app = apps.first {
+            onNotice(apps.count == 1 ? "\(app.localizedName ?? "That app") will open on your next desktop"
+                                     : "\(apps.count) apps will open on your next desktop", app.icon, keep)
         } else if let app = moved.first {
             onNotice(moved.count == 1 ? "Moved \(app.localizedName ?? "that app") to your other screen"
-                                      : "Moved \(moved.count) apps to your other screen", app.icon)
+                                      : "Moved \(moved.count) apps to your other screen", app.icon, nil)
         } else if let app = hidden.first {
             onNotice(hidden.count == 1 ? "Hid \(app.localizedName ?? "that app") until you unlock"
-                                       : "Hid \(hidden.count) apps until you unlock", app.icon)
+                                       : "Hid \(hidden.count) apps until you unlock", app.icon, keep)
         }
-        if tuckedAny || hidAny { onPutAway() }
+    }
+
+    /// Brings back windows just sent away and apps just hidden, as asked from the note: they stay
+    /// here, in front of the locked-in windows, until you unlock.
+    private func keepHere(_ windows: [(window: AXUIElement, pid: pid_t)], apps: [NSRunningApplication]) {
+        guard !ended else { return }
+        for (window, _) in windows {
+            if let id = AppWindowList.windowID(of: window) { keptWindows.insert(id) }
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        if !windows.isEmpty { onKeep(windows.map(\.window)) }
+        for app in apps {
+            keptApps.insert(app.processIdentifier)
+            app.unhide()
+        }
+        if let (window, pid) = windows.first, let id = AppWindowList.windowID(of: window) {
+            WindowFocus.raise(id, of: pid)
+        } else if let app = apps.first {
+            app.activate()
+        }
     }
 
     // MARK: Watching them
