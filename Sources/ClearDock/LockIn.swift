@@ -1,7 +1,7 @@
 import AppKit
 import os
 @preconcurrency import ApplicationServices
-import CoreImage
+import Accelerate
 import ScreenCaptureKit
 
 /// Lock-in mode: the desktop you're on, given over to two windows side by side (or, with three
@@ -1793,13 +1793,49 @@ final class CalmBackdrop {
         config.height = Int(size.height)
         config.showsCursor = false
         guard let still = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else { return nil }
-        let image = CIImage(cgImage: still)
-        let softened = image.clampedToExtent()
-            .applyingGaussianBlur(sigma: 14)
-            .cropped(to: image.extent)
-            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.8, kCIInputBrightnessKey: -0.18])
-            .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -1.1])
-        return CIContext(options: [.cacheIntermediates: false]).createCGImage(softened, from: image.extent)
+        let calm = soften(still)
+        if let calm { DebugSnapshot.save(calm, name: "calm") }
+        return calm
+    }
+
+    /// Blurred, a little greyer and much darker. Done on the processor: for a picture this small
+    /// that takes a few milliseconds, where setting up the graphics card for it took over a
+    /// hundred megabytes for a moment.
+    nonisolated private static func soften(_ image: CGImage) -> CGImage? {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+              let pixels = context.data else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let rowBytes = context.bytesPerRow
+        guard let spare = malloc(rowBytes * height) else { return nil }
+        defer { free(spare) }
+        var picture = vImage_Buffer(data: pixels, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: rowBytes)
+        var other = vImage_Buffer(data: spare, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: rowBytes)
+        // Three box blurs in a row come close to a Gaussian blur, of about 14 pixels.
+        let edges = vImage_Flags(kvImageEdgeExtend)
+        vImageBoxConvolve_ARGB8888(&picture, &other, nil, 0, 0, 29, 29, nil, edges)
+        vImageBoxConvolve_ARGB8888(&other, &picture, nil, 0, 0, 29, 29, nil, edges)
+        vImageBoxConvolve_ARGB8888(&picture, &other, nil, 0, 0, 29, 29, nil, edges)
+        // Greyer and darker in one step: the colours keep 80% of their saturation, lose 18% of
+        // their brightness, and are then taken 1.1 stops down.
+        let saturation = 0.8, exposure = pow(2, -1.1), lift = -0.18
+        // In memory the channels go blue, green, red, then alpha; these are their shares of brightness.
+        let shares = [0.0722, 0.7152, 0.2126]
+        let divisor: Int32 = 256
+        var matrix = [Int16](repeating: 0, count: 16)
+        for input in 0..<3 {
+            for output in 0..<3 {
+                let share = shares[input] * (1 - saturation) + (input == output ? saturation : 0)
+                matrix[input * 4 + output] = Int16((share * exposure * Double(divisor)).rounded())
+            }
+        }
+        matrix[15] = Int16(divisor)
+        let bias = Int32((lift * 255 * exposure * Double(divisor)).rounded())
+        let postBias: [Int32] = [bias, bias, bias, 0]
+        vImageMatrixMultiply_ARGB8888(&other, &picture, matrix, divisor, nil, postBias, vImage_Flags(kvImageNoFlags))
+        return context.makeImage()
     }
 }
 

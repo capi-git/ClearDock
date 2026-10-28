@@ -35,6 +35,13 @@ enum DebugSnapshot {
         try? data.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cleardock-\(name).png"))
     }
 
+    /// A picture Clear Dock made, saved as `cleardock-<name>.png`.
+    nonisolated static func save(_ image: CGImage, name: String) {
+        guard UserDefaults.standard.bool(forKey: "debug.snapshots"),
+              let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cleardock-\(name).png"))
+    }
+
     /// A picture of one of Clear Dock's own windows, saved as `cleardock-<name>.png`.
     static func capture(window number: Int, name: String) async {
         guard UserDefaults.standard.bool(forKey: "debug.snapshots"),
