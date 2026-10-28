@@ -368,11 +368,12 @@ final class DockModel {
     func activate(_ index: Int) {
         guard items.indices.contains(index) else { return }
         let item = items[index]
-        // Optionally, clicking the app you're already in hides it. An app with no windows open
-        // (like Finder after clicking the desktop) is left alone, so the click opens a new window.
+        // Optionally, clicking the app you're already in hides it, but only while you can see one
+        // of its windows. An app with nothing showing here (Finder after clicking the desktop, or
+        // an app whose windows are minimized or on another desktop) is brought forward instead.
         if Settings.clickToHide, item.kind == .app, let running = runningApp(for: item), !running.isHidden,
            running.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier == running.processIdentifier,
-           Self.hasWindows(running.processIdentifier) {
+           Self.isShowingWindows(running.processIdentifier) {
             running.hide()
             return
         }
@@ -541,26 +542,16 @@ final class DockModel {
 
     // MARK: Helpers
 
-    /// Whether the app has a real window open, shown or minimized. Apps such as Finder keep
-    /// invisible helper windows, so first look for a normal window actually on screen, then
-    /// ask the app itself (which also covers minimized windows), counting only true windows.
-    private static func hasWindows(_ pid: pid_t) -> Bool {
+    /// Whether one of the app's normal windows is on screen right now (on the desktop showing on
+    /// any screen). Apps such as Finder keep invisible or tiny helper windows, which don't count.
+    private static func isShowingWindows(_ pid: pid_t) -> Bool {
         let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        if onScreen.contains(where: { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }) {
-            return true
-        }
-        guard AXIsProcessTrusted() else { return false }
-        let app = AXUIElementCreateApplication(pid)
-        // Never wait long on an app that's busy.
-        AXUIElementSetMessagingTimeout(app, 0.35)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return false }
-        // Finder lists the desktop here too, as a scroll area rather than a window.
-        return windows.contains { window in
-            var role: CFTypeRef?
-            return AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) == .success
-                && (role as? String) == kAXWindowRole
+        return onScreen.contains { info in
+            guard (info[kCGWindowOwnerPID as String] as? pid_t) == pid, (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
+            return rect.width >= 80 && rect.height >= 60
         }
     }
 

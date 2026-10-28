@@ -635,10 +635,10 @@ final class DockView: NSView {
             NSWorkspace.shared.activateFileViewerSelecting([url])
             return
         }
-        // A second click on the same icon this soon is part of the same intent (a habitual
-        // double-click), so it shouldn't undo what the first click did.
+        // A second click on the same icon within the Mac's double-click time is part of the same
+        // intent (a habitual double-click), so it shouldn't undo what the first click did.
         let now = CACurrentMediaTime()
-        if let last = lastClick, last.id == item.id, now - last.time < 0.25 { return }
+        if let last = lastClick, last.id == item.id, now - last.time < NSEvent.doubleClickInterval { return }
         lastClick = (item.id, now)
         let appToHide = event.modifierFlags.contains(.option) ? NSWorkspace.shared.frontmostApplication : nil
         if item.kind == .app && !item.isRunning { showOpening(item.id) }
