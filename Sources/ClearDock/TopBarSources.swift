@@ -657,22 +657,37 @@ final class BatteryStatus {
         source = nil
     }
 
+    /// Where the power system is asked: it can take most of a second to answer while it's busy
+    /// (just after plugging in or out), which the main thread mustn't wait for.
+    private static let queue = DispatchQueue(label: "Clear Dock battery", qos: .utility)
+
     private func read() {
-        defer { onChange() }
-        percent = nil
-        charging = false
-        pluggedIn = false
+        Self.queue.async { [weak self] in
+            let reading = Self.reading()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.percent = reading.percent
+                    self.charging = reading.charging
+                    self.pluggedIn = reading.pluggedIn
+                    self.onChange()
+                }
+            }
+        }
+    }
+
+    nonisolated private static func reading() -> (percent: Int?, charging: Bool, pluggedIn: Bool) {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return }
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return (nil, false, false) }
         for source in list {
             guard let details = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue() as? [String: Any],
                   details[kIOPSTypeKey] as? String == kIOPSInternalBatteryType else { continue }
             let current = details[kIOPSCurrentCapacityKey] as? Int ?? 0
             let maximum = details[kIOPSMaxCapacityKey] as? Int ?? 100
-            percent = maximum > 0 ? Int((Double(current) / Double(maximum) * 100).rounded()) : nil
-            charging = details[kIOPSIsChargingKey] as? Bool ?? false
-            pluggedIn = details[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
-            return
+            return (maximum > 0 ? Int((Double(current) / Double(maximum) * 100).rounded()) : nil,
+                    details[kIOPSIsChargingKey] as? Bool ?? false,
+                    details[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue)
         }
+        return (nil, false, false)
     }
 }

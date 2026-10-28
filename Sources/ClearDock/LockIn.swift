@@ -1,6 +1,6 @@
 import AppKit
 import os
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import CoreImage
 import ScreenCaptureKit
 
@@ -105,14 +105,14 @@ final class LockIn {
     }
 
     /// Unlocks every desktop and puts back all the windows tucked away: the bar is going away, or
-    /// Clear Dock is quitting.
-    func endAll() {
+    /// Clear Dock is `quitting` (then it's all done before this returns).
+    func endAll(quitting: Bool = false) {
         starting = false
         dismissChooser()
-        for session in Array(sessions.values) { end(session, now: true) }
-        for windows in waiting.values { Self.unminimize(windows) }
+        for session in Array(sessions.values) { end(session, now: true, quitting: quitting) }
+        for windows in waiting.values { Self.unminimize(windows, waiting: quitting) }
         waiting.removeAll()
-        Self.unminimize(sentAway.map(\.window))
+        Self.unminimize(sentAway.map(\.window), waiting: quitting)
         sentAway.removeAll()
         updateWatching()
         saveLeftovers()
@@ -286,16 +286,16 @@ final class LockIn {
 
     /// Unlocks a desktop. Its tucked-away windows come back now if it's showing (or `now` says so),
     /// or else when you next go there, since macOS brings a window back on the desktop you're on.
-    private func end(_ session: LockInSession, now: Bool = false) {
+    private func end(_ session: LockInSession, now: Bool = false, quitting: Bool = false) {
         guard sessions[session.space] === session else { return }
         sessions[session.space] = nil
         // Lock-in is for a while: the windows go back to where they were before it.
-        session.putBack()
+        session.putBack(waiting: quitting)
         session.finish()
         // Hidden apps come back on their own desktops, wherever you are.
         session.hiddenApps.forEach { NSRunningApplication(processIdentifier: $0)?.unhide() }
         if now || WindowSpaces.currentSpaceIDs().contains(session.space) {
-            Self.unminimize(session.tucked)
+            Self.unminimize(session.tucked, waiting: quitting)
         } else if !session.tucked.isEmpty {
             waiting[session.space, default: []] += session.tucked
         }
@@ -557,10 +557,19 @@ final class LockIn {
 
     // MARK: Helpers
 
-    static func unminimize(_ windows: [AXUIElement]) {
-        for window in windows {
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+    /// Where windows are minimized, brought back and put back, off the main thread: an app that's
+    /// busy with one window (minimizing it, say) answers about the next only once it's done.
+    nonisolated static let windowQueue = DispatchQueue(label: "Clear Dock lock-in windows", qos: .userInitiated)
+
+    /// Brings windows back from the Dock, off the main thread unless `waiting` (Clear Dock is quitting).
+    static func unminimize(_ windows: [AXUIElement], waiting: Bool = false) {
+        guard !windows.isEmpty else { return }
+        let work: @Sendable () -> Void = {
+            for window in windows {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            }
         }
+        if waiting { work() } else { windowQueue.async(execute: work) }
     }
 
     private static func explain(_ title: String, _ detail: String) {
@@ -697,17 +706,25 @@ private final class LockInSession {
     private var startingFrames: [CGWindowID: CGRect] = [:]
 
     /// Puts the windows back where they were before lock-in (any that are still open).
-    func putBack() {
+    /// Off the main thread, unless `waiting` (Clear Dock is quitting).
+    func putBack(waiting: Bool = false) {
         // Only to where a screen still is (one may have been unplugged since), in window coordinates.
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
         let screens = NSScreen.screens.map { CGRect(x: $0.frame.minX, y: mainHeight - $0.frame.maxY, width: $0.frame.width, height: $0.frame.height) }
-        for pane in panes where !minimized.contains(pane.id) {
-            guard let frame = startingFrames[pane.id], LockIn.frame(of: pane.element) != nil,
-                  screens.contains(where: { $0.intersection(frame).width >= 120 && $0.intersection(frame).height >= 80 }) else { continue }
-            Self.setSize(pane.element, frame.size)
-            Self.setPosition(pane.element, frame.origin)
-            Self.setSize(pane.element, frame.size)
+        let moves = panes.compactMap { pane -> (element: AXUIElement, frame: CGRect)? in
+            guard !minimized.contains(pane.id), let frame = startingFrames[pane.id],
+                  screens.contains(where: { $0.intersection(frame).width >= 120 && $0.intersection(frame).height >= 80 }) else { return nil }
+            return (pane.element, frame)
         }
+        let work: @Sendable () -> Void = {
+            for (element, frame) in moves where LockIn.frame(of: element) != nil {
+                Self.setSize(element, frame.size)
+                Self.setPosition(element, frame.origin)
+                Self.setSize(element, frame.size)
+            }
+        }
+        // After anything still being done to them, so a fit under way can't undo it.
+        if waiting { paneQueue.sync(execute: work) } else { paneQueue.async(execute: work) }
     }
 
     /// Something lock-in did that's worth a word (a window that opened here was sent elsewhere).
@@ -730,7 +747,8 @@ private final class LockInSession {
 
     func begin() {
         if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier { noteInFront(front) }
-        for pane in panes { startingFrames[pane.id] = LockIn.frame(of: pane.element) }
+        // Where they were, to go back to on unlocking: asked before anything moves them.
+        look { [weak self] found in self?.startingFrames = found }
         // First, so it fades in behind the windows as they settle into place.
         updateBackdrop()
         watch()
@@ -766,22 +784,31 @@ private final class LockInSession {
     }
 
     func tuck(_ windows: [AXUIElement]) {
-        var tried: [AwayWindow] = []
-        for window in windows {
-            // Its number first, while its app isn't busy minimizing it.
-            let id = AppWindowList.windowID(of: window)
-            guard AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success else { continue }
-            tucked.append(window)
-            guard let id else { continue }
-            putAway.insert(id)
+        // Their numbers and apps first, while the apps aren't busy minimizing them.
+        let away = windows.compactMap { window -> AwayWindow? in
             var pid: pid_t = 0
-            if AXUIElementGetPid(window, &pid) == .success { tried.append(AwayWindow(window: window, pid: pid, id: id)) }
+            guard let id = AppWindowList.windowID(of: window), AXUIElementGetPid(window, &pid) == .success else { return nil }
+            return AwayWindow(window: window, pid: pid, id: id)
         }
-        // Those that can't be minimized go with their app, hidden.
-        afterMinimizing(tried) { [weak self] stuck in
-            guard let self, !stuck.isEmpty else { return }
-            self.hide(Set(stuck.map(\.pid)))
-            self.onPutAway()
+        guard !away.isEmpty else { return }
+        LockIn.windowQueue.async { [weak self] in
+            let done = away.filter { AXUIElementSetAttributeValue($0.window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // Unlocked meanwhile: they come straight back.
+                    guard !self.ended else { return LockIn.unminimize(done.map(\.window)) }
+                    self.tucked += done.map(\.window)
+                    self.putAway.formUnion(done.map(\.id))
+                    self.onPutAway()
+                    // Those that can't be minimized go with their app, hidden.
+                    self.afterMinimizing(done) { [weak self] stuck in
+                        guard let self, !stuck.isEmpty else { return }
+                        self.hide(Set(stuck.map(\.pid)))
+                        self.onPutAway()
+                    }
+                }
+            }
         }
     }
 
@@ -859,9 +886,20 @@ private final class LockInSession {
     }
 
     private func fit() {
+        look { [weak self] found in self?.fit(found) }
+    }
+
+    /// Puts the windows in their places, given where they are now (`found`, by window).
+    private func fit(_ found: [CGWindowID: CGRect]) {
+        // A drag may have begun while their apps were being asked.
+        guard !dragging else { return }
         let places = targets
+        var moves: [(element: AXUIElement, frame: CGRect)] = []
+        // Whether any was found somewhere new since it was last fitted: worth one more look once
+        // they've moved, which finds out one that won't grow all the way.
+        var moving = false
         for (pane, place) in zip(panes, places) where !minimized.contains(pane.id) {
-            guard let frame = LockIn.frame(of: pane.element) else { continue }
+            guard let frame = found[pane.id] else { continue }
             // Bigger than it was thought to go: it can fill its place after all.
             if let largest = largestSizes[pane.id], frame.width > largest.width + 16 || frame.height > largest.height + 16 {
                 largestSizes[pane.id] = nil
@@ -877,15 +915,31 @@ private final class LockInSession {
                 target = placed(place, for: pane.id)
                 if Self.close(frame, target) { continue }
             }
+            if lastFound[pane.id].map({ !(Self.close($0, frame) && $0.size == frame.size) }) ?? true { moving = true }
             lastFound[pane.id] = frame
             lockInLog.notice("Lock-in: fitting a window from \(String(describing: frame), privacy: .public) to \(String(describing: target), privacy: .public)")
-            // Size, place, and size again: some apps only accept a size that fits where they are.
-            Self.setSize(pane.element, target.size)
-            Self.setPosition(pane.element, target.origin)
-            Self.setSize(pane.element, target.size)
+            moves.append((pane.element, target))
         }
         if places.count == panes.count { knownFrames = placed(places) }
-        updateDecorations()
+        guard !moves.isEmpty else { return updateDecorations(frames(from: found)) }
+        let ids = panes.map { (id: $0.id, element: $0.element) }
+        paneQueue.async { [weak self] in
+            // Size, place, and size again: some apps only accept a size that fits where they are.
+            for (element, frame) in moves {
+                Self.setSize(element, frame.size)
+                Self.setPosition(element, frame.origin)
+                Self.setSize(element, frame.size)
+            }
+            var now: [CGWindowID: CGRect] = [:]
+            for pane in ids { now[pane.id] = LockIn.frame(of: pane.element) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, !self.ended, !self.dragging else { return }
+                    self.updateDecorations(self.frames(from: now))
+                    if moving { self.scheduleSettle() }
+                }
+            }
+        }
     }
 
     /// Where a window goes in its place: all of it, or the middle of it for one that won't grow that big.
@@ -906,13 +960,18 @@ private final class LockInSession {
         // Not while Mission Control is open (it may have opened since this was asked for, before
         // the bar's check noticed): where it shows the windows isn't where they are.
         guard !LockIn.missionControlOpen, !MissionControl.isShowing else { return }
-        guard let area, let frames = currentFrames() else { return }
+        look { [weak self] found in self?.settle(found) }
+    }
+
+    private func settle(_ found: [CGWindowID: CGRect]) {
+        // Things may have moved on while their apps were being asked.
+        guard !dragging, !LockIn.missionControlOpen, let area, let frames = frames(from: found) else { return }
         if stacked {
             settleStack(frames, in: area)
-            return fit()
+            return fit(found)
         }
         // Just one: it has the whole space, and goes back to it if moved.
-        guard panes.count == 2 else { return fit() }
+        guard panes.count == 2 else { return fit(found) }
         let goals = targets
         let left = frames[0], right = frames[1]
         let gap = CGFloat(BarSettings.lockInGap)
@@ -932,7 +991,7 @@ private final class LockInSession {
                 BarSettings.lockInSplit = Self.clampSplit((area.width - gap - right.width) / usable)
             }
         }
-        fit()
+        fit(found)
     }
 
     private static func clampSplit(_ value: CGFloat) -> Double { Double(min(0.8, max(0.2, value))) }
@@ -1190,7 +1249,7 @@ private final class LockInSession {
         // app that's just opened can be slow to answer, and nothing on screen should wait for it.
         arriving = true
         let work = found.map { (pid: $0.key, ids: $0.value) }
-        Self.arrivals.async { [weak self] in
+        LockIn.windowQueue.async { [weak self] in
             let arrivals = work.map { Self.deal(with: $0.pid, windows: $0.ids, room: room) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.arrived(arrivals) }
@@ -1215,8 +1274,6 @@ private final class LockInSession {
         let id: CGWindowID
     }
 
-    /// Asked of one app at a time, in turn, off the main thread.
-    nonisolated private static let arrivals = DispatchQueue(label: "Clear Dock lock-in arrivals", qos: .userInitiated)
     /// Whether apps are being asked about new windows right now; the next look waits till they've answered.
     private var arriving = false
 
@@ -1310,7 +1367,7 @@ private final class LockInSession {
     private func afterMinimizing(_ windows: [AwayWindow], then: @escaping ([AwayWindow]) -> Void) {
         guard !windows.isEmpty else { return then([]) }
         // The apps are asked off the main thread, as when the windows were minimized.
-        Self.arrivals.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+        LockIn.windowQueue.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             let stuck = windows.filter { (LockIn.attribute($0.window, kAXMinimizedAttribute) as? Bool) != true }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -1438,8 +1495,15 @@ private final class LockInSession {
     /// else where they are now.
     func updateDecorations(_ frames: [CGRect]? = nil) {
         if dragging, frames == nil { return }
-        guard !ended, showing, !LockIn.missionControlOpen, minimized.isEmpty,
-              let frames = frames ?? currentFrames(), frames.count == panes.count else { return hideDecorations() }
+        guard !ended, showing, !LockIn.missionControlOpen, minimized.isEmpty else { return hideDecorations() }
+        guard let frames else {
+            // Where they are, once their apps have said.
+            return look { [weak self] found in
+                guard let self, let frames = self.frames(from: found) else { return }
+                self.updateDecorations(frames)
+            }
+        }
+        guard frames.count == panes.count else { return hideDecorations() }
         drawnFrames = frames
         knownFrames = frames
         let mainHeight = NSScreen.screens.first?.frame.height ?? 0
@@ -1502,6 +1566,33 @@ private final class LockInSession {
         guard minimized.isEmpty else { return nil }
         let frames = panes.compactMap { LockIn.frame(of: $0.element) }
         return frames.count == panes.count ? frames : nil
+    }
+
+    /// The windows' frames in `panes`' order, from `found` (by window), if every one is there.
+    private func frames(from found: [CGWindowID: CGRect]) -> [CGRect]? {
+        guard minimized.isEmpty else { return nil }
+        let frames = panes.compactMap { found[$0.id] }
+        return frames.count == panes.count ? frames : nil
+    }
+
+    /// Where lock-in asks the apps where the windows are, and moves them, in turn: off the main
+    /// thread, as an app busy redrawing at a new size (or minimizing another of its windows)
+    /// answers only once it's done.
+    private let paneQueue = DispatchQueue(label: "Clear Dock lock-in", qos: .userInteractive)
+
+    /// Where the windows are now, by window, handed to `then` on the main thread.
+    private func look(_ then: @escaping @MainActor ([CGWindowID: CGRect]) -> Void) {
+        let panes = self.panes.map { (id: $0.id, element: $0.element) }
+        paneQueue.async { [weak self] in
+            var found: [CGWindowID: CGRect] = [:]
+            for pane in panes { found[pane.id] = LockIn.frame(of: pane.element) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, !self.ended else { return }
+                    then(found)
+                }
+            }
+        }
     }
 
     // MARK: Helpers

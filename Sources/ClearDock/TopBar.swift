@@ -288,6 +288,9 @@ final class TopBarController {
     /// Bars already put in `BarSpace`. A bar that's put away leaves it, and goes back in when shown.
     private var inBarSpace = Set<CGDirectDisplayID>()
     private let desktopQueue = DispatchQueue(label: "ClearDock.Desktops", qos: .userInitiated)
+    /// Other apps' islands along the top of the screens, as last seen: looked for off the main
+    /// thread, as listing the windows on screen can be slow while macOS is busy.
+    private var islands: [CGRect] = []
     private var readingDesktops = false
     private var desktopsAgain = false
     private var pendingCoverChecks: [DispatchWorkItem] = []
@@ -445,7 +448,7 @@ final class TopBarController {
 
     /// Clear Dock is quitting: put back the windows lock-in mode tucked away.
     func prepareForQuit() {
-        lockIn.endAll()
+        lockIn.endAll(quitting: true)
     }
 
     func settingsChanged() {
@@ -489,9 +492,13 @@ final class TopBarController {
     /// windows and the notch area only settle then.
     private func menuBarChanged() {
         layout()
+        refreshIslands()
         for delay in [0.4, 1.2, 3] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                MainActor.assumeIsolated { self?.layout() }
+                MainActor.assumeIsolated {
+                    self?.layout()
+                    self?.refreshIslands()
+                }
             }
         }
     }
@@ -566,6 +573,7 @@ final class TopBarController {
         tick()
         refreshFrontApp()
         refreshDesktops()
+        refreshIslands()
         checkCovered()
         checkFullScreen()
         startExposeWatch()
@@ -610,6 +618,7 @@ final class TopBarController {
         panels.removeAll()
         DockSpaceKeeper.shared.reserveTop([])
         BarRoom.bottoms = [:]
+        islands = []
         BarLookShare.publish([:])
         MemoryRelief.soon()
     }
@@ -653,7 +662,6 @@ final class TopBarController {
         guard running else { return }
         let screens = BarSettings.allScreens ? NSScreen.screens : Array(NSScreen.screens.prefix(1))
         let replacesMenuBar = BarSettings.takesMenuBarsPlace
-        let islands = Self.islands()
         let sharedDesktops = model.desktops.keys.contains("Main")
         var layouts: [String: BarLayout] = [:]
         var reserved: [(bottom: CGFloat, screen: NSScreen)] = []
@@ -786,7 +794,10 @@ final class TopBarController {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.checkExpose(backdrops)
-                    if appeared { self?.checkCoveredSoon() }
+                    if appeared {
+                        self?.checkCoveredSoon()
+                        self?.refreshIslands()
+                    }
                 }
             }
         }
@@ -899,7 +910,7 @@ final class TopBarController {
 
     /// Other apps' islands along the top of a screen, like Vorssaint's: small windows above the
     /// menu bar, in the system's window coordinates.
-    private static func islands() -> [CGRect] {
+    nonisolated private static func findIslands() -> [CGRect] {
         let me = getpid()
         let above = Int(CGWindowLevelForKey(.mainMenuWindow))
         let menus = Int(CGWindowLevelForKey(.popUpMenuWindow))
@@ -913,6 +924,20 @@ final class TopBarController {
                   rect.width >= 40, rect.width <= 900, rect.height >= 10, rect.height <= 80
             else { return nil }
             return rect
+        }
+    }
+
+    /// Looks for islands again, and makes room for them if they've changed.
+    private func refreshIslands() {
+        desktopQueue.async { [weak self] in
+            let found = Self.findIslands()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.running, found != self.islands else { return }
+                    self.islands = found
+                    self.layout()
+                }
+            }
         }
     }
 
