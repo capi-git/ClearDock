@@ -133,6 +133,7 @@ final class SettingsStore: ObservableObject {
     // Dock
     @Published var autoHide = true { didSet { edit(keepsTheme: true) { Settings.autoHide = autoHide } } }
     @Published var showPinned = false { didSet { edit(keepsTheme: true) { Settings.showPinned = showPinned } } }
+    @Published var hiddenApps: [String] = [] { didSet { edit(keepsTheme: true) { Settings.hiddenApps = hiddenApps } } }
     @Published var showTrash = true { didSet { edit(keepsTheme: true) { Settings.showTrash = showTrash } } }
     @Published var showBadges = true { didSet { edit(keepsTheme: true) { Settings.showBadges = showBadges } } }
     @Published var showPreviews = true { didSet { edit(keepsTheme: true) { Settings.showPreviews = showPreviews } } }
@@ -350,6 +351,7 @@ final class SettingsStore: ObservableObject {
         iconSize = Settings.iconSize
         autoHide = Settings.autoHide
         showPinned = Settings.showPinned
+        hiddenApps = Settings.hiddenApps
         showTrash = Settings.showTrash
         showBadges = Settings.showBadges
         showPreviews = Settings.showPreviews
@@ -577,10 +579,25 @@ private struct DockTab: View {
                 Toggle("Hide until the pointer reaches the edge", isOn: $store.autoHide)
                 Toggle("Hide the macOS Dock", isOn: $store.hideSystemDock)
             }
-            Section("What it shows") {
+            Section {
                 Toggle("Apps pinned in the macOS Dock", isOn: $store.showPinned)
                 Toggle("Trash", isOn: $store.showTrash)
                 Toggle("Notification badges", isOn: $store.showBadges)
+                ForEach(store.hiddenApps, id: \.self) { app in
+                    HStack(spacing: 8) {
+                        if let icon = SettingsStore.appIcon(app) {
+                            Image(nsImage: icon).resizable().frame(width: 20, height: 20)
+                        }
+                        Text(SettingsStore.appName(app))
+                        Spacer()
+                        Button("Show in Dock") { store.hiddenApps.removeAll { $0 == app } }
+                            .controlSize(.small)
+                    }
+                }
+            } header: {
+                Text("What it shows")
+            } footer: {
+                Note("Right-click an app in the dock and choose Hide from Dock to keep it out, even while it's open.")
             }
             Section {
                 Toggle("Window previews when pointing at an app", isOn: $store.showPreviews)

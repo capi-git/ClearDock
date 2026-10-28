@@ -20,6 +20,13 @@ enum Settings {
         set { defaults.set(newValue, forKey: "showPinned") }
     }
 
+    /// Apps never shown in the dock, even while they're open (like a live wallpaper app that
+    /// counts as an ordinary app), by their id in the dock.
+    static var hiddenApps: [String] {
+        get { defaults.stringArray(forKey: "hiddenApps") ?? [] }
+        set { defaults.set(newValue, forKey: "hiddenApps") }
+    }
+
     static var showTrash: Bool {
         get { defaults.bool(forKey: "showTrash") }
         set { defaults.set(newValue, forKey: "showTrash") }

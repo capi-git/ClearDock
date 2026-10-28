@@ -182,8 +182,9 @@ final class DockModel {
 
         var result: [DockItem] = []
         var used = Set<String>()
+        let hidden = Set(Settings.hiddenApps)
         func addApp(key: String, url: URL?) {
-            guard !used.contains(key) else { return }
+            guard !used.contains(key), key == "com.apple.finder" || !hidden.contains(key) else { return }
             used.insert(key)
             result.append(appItem(key: key, url: url, running: runningByKey[key]))
         }
@@ -454,6 +455,13 @@ final class DockModel {
         menu.addItem(ActionMenuItem("Change Icon…") { [weak self] in self?.chooseIcon(for: item.id, name: item.name) })
         if Settings.customIcons[item.id] != nil {
             menu.addItem(ActionMenuItem("Use Original Icon") { [weak self] in self?.setCustomIcon(nil, for: item.id) })
+        }
+        if item.id != "com.apple.finder" {
+            // Kept out of the dock even while it's open; Settings lists it to bring it back.
+            menu.addItem(ActionMenuItem("Hide from Dock") { [weak self] in
+                Settings.hiddenApps = Settings.hiddenApps.filter { $0 != item.id } + [item.id]
+                self?.reload()
+            })
         }
         if let app, item.id != "com.apple.finder" {
             menu.addItem(.separator())
