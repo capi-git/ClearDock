@@ -182,8 +182,16 @@ enum WindowFocus {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { whenShowing(space, waited: waited + 0.05, then: then) }
     }
 
+    /// Where windows are brought forward through their apps, one after another, so they come in
+    /// the order they were asked for.
+    nonisolated private static let queue = DispatchQueue(label: "Clear Dock window focus", qos: .userInteractive)
+    /// Counts the windows asked to come forward: only the latest one's app is brought forward.
+    private static var requests = 0
+
     private static func focus(_ windowID: CGWindowID, of app: NSRunningApplication, window: AXUIElement?) {
         let pid = app.processIdentifier
+        requests += 1
+        let request = requests
         // The click landed on Clear Dock, so it may become active for a moment and hand focus on.
         NSApp.activate()
         NSApp.yieldActivation(to: app)
@@ -192,12 +200,16 @@ enum WindowFocus {
         // That's asked of the app off the main thread: one bringing a window back from the Dock is
         // busy animating it for a moment, and only answers the rest once it's done.
         if let window {
-            DispatchQueue.global(qos: .userInteractive).async {
+            queue.async {
                 AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                 AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                 AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { cameForward(windowID, of: app, found: true, activated: app.activate()) }
+                    MainActor.assumeIsolated {
+                        // Another was asked for meanwhile: that one comes forward instead.
+                        guard request == requests else { return }
+                        cameForward(windowID, of: app, found: true, activated: app.activate())
+                    }
                 }
             }
             return

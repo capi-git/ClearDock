@@ -448,8 +448,9 @@ final class TopBarController {
         }
     }
 
-    /// Clear Dock is quitting: put back the windows lock-in mode tucked away.
-    func prepareForQuit() {
+    /// Clear Dock is quitting: put back the windows lock-in mode tucked away. Says whether there
+    /// were any, which take a moment to get back.
+    func prepareForQuit() -> Bool {
         lockIn.endAll(quitting: true)
     }
 
@@ -537,10 +538,12 @@ final class TopBarController {
                      NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
             observe(workspace, name) { $0.refreshDesktops(); $0.model.pruneIcons() }
         }
-        observe(workspace, NSWorkspace.didWakeNotification) { $0.tick(); $0.refreshDesktops(); $0.layout() }
+        observe(workspace, NSWorkspace.didWakeNotification) { $0.tick(); $0.refreshDesktops(); $0.layout(); $0.refreshIslands() }
         observe(.default, NSApplication.didChangeScreenParametersNotification) {
             BarSettings.forgetMenuBarHidden()
             $0.scheduleScreenLayout()
+            // Other apps' islands move with the screens.
+            $0.refreshIslands()
         }
         observe(.default, WallpaperPalette.didChange) { $0.applyLook(); $0.refreshBackdrops(after: 0.2) }
         observe(.default, .NSSystemTimeZoneDidChange) { $0.tick() }

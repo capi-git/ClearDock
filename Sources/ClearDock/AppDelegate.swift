@@ -99,7 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        topBar?.prepareForQuit()
+        // Windows lock-in puts back are still on their way (out of the Dock, say) for a moment;
+        // restarting the macOS Dock below would stop them where they are.
+        if topBar?.prepareForQuit() == true { Thread.sleep(forTimeInterval: 0.7) }
         // Across a restart, keep the macOS Dock hidden only if Clear Dock will reopen at login.
         if poweringOff && LoginItem.isEnabled { return }
         SystemDock.restore()
