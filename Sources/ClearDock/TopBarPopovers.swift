@@ -538,12 +538,15 @@ final class LockInPicker {
     private var monitors: [Any] = []
     private var finish: (([LockIn.Choice]?) -> Void)?
 
-    func show(_ choices: [LockIn.Choice], look: BarLook, below barBottom: CGFloat, on screen: NSScreen,
+    /// The window it's in, for checking how it looks.
+    var windowNumber: Int { panel.windowNumber }
+
+    func show(_ choices: [LockIn.Choice], title: String, look: BarLook, below barBottom: CGFloat, on screen: NSScreen,
               done: @escaping ([LockIn.Choice]?) -> Void) {
         close()
         finish = done
-        let view = LockInPickerView(choices: Array(choices.prefix(10)), look: look, tucksOthers: BarSettings.lockInHideOthers,
-                                    aspect: screen.frame.width / max(screen.frame.height, 1)) { [weak self] picked in
+        panel.hasShadow = true
+        let view = LockInPickerView(choices: Array(choices.prefix(10)), look: look, title: title, screen: screen) { [weak self] picked in
             // After the click that chose them has finished.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.close(with: picked) } }
         }
@@ -582,32 +585,80 @@ final class LockInPicker {
     }
 }
 
-/// The lock-in chooser: a layout (one app, two side by side, or three with two stacked), a picture
-/// of the screen laid out that way with a window in each place, and the desktop's windows. It
-/// starts with a guess at which window goes where: click a place, then a window, to change it.
+/// Pictures for the lock-in chooser: each window as it looks, and the calm backdrop the windows
+/// will sit on, taken once when it opens (Screen Recording permission is needed; without it the
+/// app icons stand in).
+@MainActor
+final class LockInPictures: ObservableObject {
+    @Published var windows: [CGWindowID: CGImage] = [:]
+    @Published var backdrop: CGImage?
+
+    func load(_ choices: [LockIn.Choice], display: CGDirectDisplayID?, screen: CGSize) async {
+        guard CGPreflightScreenCaptureAccess() else { return }
+        async let backdrop = CalmBackdrop.calmPicture(display: display, size: CGSize(width: (screen.width / 4).rounded(), height: (screen.height / 4).rounded()))
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) else {
+            self.backdrop = await backdrop
+            return
+        }
+        let shots = await withTaskGroup(of: (CGWindowID, CGImage)?.self) { group -> [CGWindowID: CGImage] in
+            for choice in choices {
+                guard let window = content.windows.first(where: { $0.windowID == choice.id }) else { continue }
+                let config = SCStreamConfiguration()
+                let scale = min(1, 520 / max(window.frame.width, 1))
+                config.width = max(16, Int(window.frame.width * scale))
+                config.height = max(16, Int(window.frame.height * scale))
+                config.showsCursor = false
+                config.ignoreShadowsSingleWindow = true
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                group.addTask {
+                    guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else { return nil }
+                    return (choice.id, image)
+                }
+            }
+            var shots: [CGWindowID: CGImage] = [:]
+            for await shot in group { if let (id, image) = shot { shots[id] = image } }
+            return shots
+        }
+        // Shown together, rather than one after another.
+        self.backdrop = await backdrop
+        self.windows = shots
+    }
+}
+
+/// The lock-in chooser. The screen as it will look, with the windows in their places over the calm
+/// backdrop, is the heart of it; above, the layout (one app, two side by side, three with two
+/// stacked); below, the desktop's other windows. It starts with a guess at which window goes where.
+/// Click a window below to put it in the highlighted place, or drag one place onto another to swap.
 private struct LockInPickerView: View {
     let choices: [LockIn.Choice]
     let look: BarLook
-    let tucksOthers: Bool
-    /// The screen's width over its height, for the picture of it.
-    let aspect: CGFloat
+    let title: String
+    let screenSize: CGSize
+    let display: CGDirectDisplayID?
     let done: ([LockIn.Choice]) -> Void
+    @StateObject private var pictures = LockInPictures()
     @State private var layout: Int
     @State private var slots: [CGWindowID?]
-    /// The place a window clicked in the list goes to.
-    @State private var active: Int
+    @State private var selected: Int
+    @State private var tuck = BarSettings.lockInHideOthers
+    @State private var dragging: Int?
+    @State private var dragOffset: CGSize = .zero
 
-    init(choices: [LockIn.Choice], look: BarLook, tucksOthers: Bool, aspect: CGFloat, done: @escaping ([LockIn.Choice]) -> Void) {
+    private static let width: CGFloat = 448
+    private static let inset: CGFloat = 16
+
+    init(choices: [LockIn.Choice], look: BarLook, title: String, screen: NSScreen, done: @escaping ([LockIn.Choice]) -> Void) {
         self.choices = choices
         self.look = look
-        self.tucksOthers = tucksOthers
-        self.aspect = aspect
+        self.title = title
+        self.screenSize = screen.frame.size
+        self.display = screen.displayID
         self.done = done
         let layout = min(BarSettings.lockInLayout, max(1, choices.count))
         let guess = Self.guess(layout, from: choices)
         _layout = State(initialValue: layout)
         _slots = State(initialValue: guess)
-        _active = State(initialValue: guess.firstIndex { $0 == nil } ?? 0)
+        _selected = State(initialValue: Self.firstToFill(guess, layout: layout))
     }
 
     /// The front window of the apps most in front (apps left alone last), each in its place.
@@ -617,17 +668,13 @@ private struct LockInPickerView: View {
         return (0..<count).map { $0 < picked.count ? picked[$0].id : nil }
     }
 
-    private static func names(_ count: Int) -> [String] {
-        switch count {
-        case 1: ["Whole screen"]
-        case 2: ["Left", "Right"]
-        default: ["Top", "Bottom", "Right"]
-        }
+    /// The place a window chosen below goes: the first empty one, or else the main one.
+    private static func firstToFill(_ slots: [CGWindowID?], layout: Int) -> Int {
+        slots.firstIndex { $0 == nil } ?? (layout == 3 ? 2 : 0)
     }
 
     /// The places in a unit square (measured from the top left), shared as lock-in will share the screen.
-    static func places(_ count: Int) -> [CGRect] {
-        let gap: CGFloat = 0.03
+    static func places(_ count: Int, gap: CGFloat) -> [CGRect] {
         switch count {
         case 1:
             return [CGRect(x: 0, y: 0, width: 1, height: 1)]
@@ -637,185 +684,302 @@ private struct LockInPickerView: View {
                     CGRect(x: split + gap / 2, y: 0, width: 1 - split - gap / 2, height: 1)]
         default:
             let column = CGFloat(BarSettings.lockInStackColumn), rows = CGFloat(BarSettings.lockInStackRows)
-            return [CGRect(x: 0, y: 0, width: column - gap / 2, height: rows - gap / 2),
-                    CGRect(x: 0, y: rows + gap / 2, width: column - gap / 2, height: 1 - rows - gap / 2),
+            return [CGRect(x: 0, y: 0, width: column - gap / 2, height: rows - gap),
+                    CGRect(x: 0, y: rows + gap, width: column - gap / 2, height: 1 - rows - gap),
                     CGRect(x: column + gap / 2, y: 0, width: 1 - column - gap / 2, height: 1)]
         }
     }
 
     private var complete: Bool { slots.count == layout && !slots.contains(nil) }
-
-    private var instruction: String {
-        if complete { return "Click a place, then a window, to change it." }
-        if layout == 1 { return "Choose the window to lock in." }
-        return "Choose the window for the \(Self.names(layout)[active].lowercased())."
-    }
+    private var others: [LockIn.Choice] { choices.filter { !slots.contains($0.id) } }
 
     var body: some View {
         let accent = Color(nsColor: look.accent)
-        let names = Self.names(layout)
-        let width: CGFloat = 316
-        let height = min(150, max(84, (width / max(aspect, 0.5)).rounded()))
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                Text("Lock in").font(.system(size: 13.5, weight: .bold, design: .rounded))
-                Spacer(minLength: 8)
-                HStack(spacing: 4) {
-                    ForEach(1...3, id: \.self) { count in
-                        let possible = count <= choices.count
-                        LayoutButton(places: Self.places(count), selected: layout == count, accent: accent)
-                            .opacity(possible ? 1 : 0.3)
-                            .onTapGesture { if possible { choose(count) } }
-                            .help(count == 1 ? "One app" : count == 2 ? "Two side by side" : "Three: two stacked, one beside them")
+        let screenWidth = Self.width - Self.inset * 2
+        let screenHeight = min(230, max(120, (screenWidth * screenSize.height / max(screenSize.width, 1)).rounded()))
+        VStack(alignment: .leading, spacing: 14) {
+            header(accent: accent)
+            screen(width: screenWidth, height: screenHeight, accent: accent)
+            tray(accent: accent)
+            footer(accent: accent)
+        }
+        .padding(Self.inset)
+        .frame(width: Self.width)
+        .foregroundStyle(.white)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+            shape.fill(Color(nsColor: look.fill.blended(withFraction: 0.62, of: .black) ?? .black))
+                .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        }
+        .task { await pictures.load(choices, display: display, screen: screenSize) }
+    }
+
+    // MARK: Parts
+
+    private func header(accent: Color) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(look.onAccent)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(accent))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Lock in").font(.system(size: 15, weight: .bold, design: .rounded))
+                Text(title).font(.system(size: 11.5, weight: .medium, design: .rounded)).opacity(0.55)
+            }
+            Spacer(minLength: 8)
+            HStack(spacing: 2) {
+                ForEach(1...3, id: \.self) { count in
+                    let possible = count <= choices.count
+                    LayoutChip(places: Self.places(count, gap: 0.08), selected: layout == count, accent: accent)
+                        .opacity(possible ? 1 : 0.3)
+                        .onTapGesture { if possible { choose(count) } }
+                        .help(count == 1 ? "One app" : count == 2 ? "Two side by side" : "Three: two stacked, one beside them")
+                }
+            }
+            .padding(3)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.06)))
+        }
+    }
+
+    /// The screen as it will look.
+    private func screen(width: CGFloat, height: CGFloat, accent: Color) -> some View {
+        let pad: CGFloat = 8
+        let places = Self.places(layout, gap: 10 / width)
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let areaWidth = width - pad * 2, areaHeight = height - pad * 2
+        return ZStack(alignment: .topLeading) {
+            LinearGradient(colors: [Color(white: 0.16), Color(white: 0.08)], startPoint: .top, endPoint: .bottom)
+                .overlay {
+                    if let backdrop = pictures.backdrop {
+                        Image(decorative: backdrop, scale: 1).resizable().aspectRatio(contentMode: .fill)
                     }
                 }
-            }
-            // The screen, laid out, with the window chosen for each place.
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(Self.places(layout).enumerated()), id: \.offset) { index, place in
-                    SlotView(choice: slots[index].flatMap { id in choices.first { $0.id == id } }, name: names[index],
-                             active: index == active, accent: accent)
-                        .frame(width: place.width * width, height: place.height * height)
-                        .offset(x: place.minX * width, y: place.minY * height)
-                        .onTapGesture { active = index }
-                }
-            }
-            .frame(width: width, height: height, alignment: .topLeading)
-            Text(instruction).font(.system(size: 11.5, design: .rounded)).opacity(0.7)
-            VStack(spacing: 2) {
-                ForEach(choices) { choice in
-                    PickerRow(choice: choice, place: slots.firstIndex(of: choice.id).map { names[$0] }, look: look) {
-                        assign(choice.id)
-                    }
-                }
-            }
-            HStack(alignment: .center) {
-                if tucksOthers {
-                    Text("The rest are tucked away until you unlock.")
-                        .font(.system(size: 11, design: .rounded)).opacity(0.55)
-                }
-                Spacer(minLength: 8)
-                Text("Lock in")
-                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(look.onAccent)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(accent.opacity(complete ? 1 : 0.35)))
-                    .contentShape(Capsule())
-                    .onTapGesture { if complete { done(slots.compactMap { id in choices.first { $0.id == id } }) } }
+                .frame(width: width, height: height)
+                .clipped()
+            ForEach(Array(places.enumerated()), id: \.offset) { index, place in
+                let frame = CGRect(x: pad + place.minX * areaWidth, y: pad + place.minY * areaHeight,
+                                   width: place.width * areaWidth, height: place.height * areaHeight)
+                // The highlight shows where a window chosen below goes: only when there's one to choose.
+                PlaceView(choice: slots[index].flatMap { id in choices.first { $0.id == id } },
+                          picture: slots[index].flatMap { pictures.windows[$0] },
+                          selected: index == selected && (!others.isEmpty || slots[index] == nil), accent: accent)
+                    .frame(width: frame.width, height: frame.height)
+                    .scaleEffect(dragging == index ? 1.03 : 1)
+                    .offset(x: frame.minX + (dragging == index ? dragOffset.width : 0),
+                            y: frame.minY + (dragging == index ? dragOffset.height : 0))
+                    .zIndex(dragging == index ? 1 : 0)
+                    .onTapGesture { selected = index }
+                    .gesture(DragGesture(minimumDistance: 4)
+                        .onChanged { value in
+                            dragging = index
+                            dragOffset = value.translation
+                        }
+                        .onEnded { value in
+                            let point = CGPoint(x: frame.midX + value.translation.width, y: frame.midY + value.translation.height)
+                            if let target = places.indices.first(where: { other in
+                                let place = places[other]
+                                return CGRect(x: pad + place.minX * areaWidth, y: pad + place.minY * areaHeight,
+                                              width: place.width * areaWidth, height: place.height * areaHeight).contains(point)
+                            }), target != index {
+                                slots.swapAt(index, target)
+                                selected = target
+                            }
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                dragging = nil
+                                dragOffset = .zero
+                            }
+                        })
             }
         }
-        .foregroundStyle(.white)
-        .padding(12)
-        .frame(width: 340)
-        // See-through glass, like the bar's, with a hint of the bar's colour so the words stay clear.
-        .glassEffect(.regular.tint(Color(nsColor: look.fill).opacity(0.3)), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(width: width, height: height, alignment: .topLeading)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: layout)
+        .animation(.spring(response: 0.25, dampingFraction: 0.86), value: slots)
     }
+
+    /// The desktop's other windows, to put in the highlighted place.
+    @ViewBuilder private func tray(accent: Color) -> some View {
+        let rest = others
+        if rest.isEmpty, layout > 1 {
+            Text("Drag one window onto another to swap them.")
+                .font(.system(size: 11, design: .rounded))
+                .opacity(0.5)
+        }
+        if !rest.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("CLICK A WINDOW TO PUT IT IN THE HIGHLIGHTED PLACE")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .kerning(0.6)
+                    .opacity(0.45)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(rest) { choice in
+                            WindowCard(choice: choice, picture: pictures.windows[choice.id])
+                                .onTapGesture { put(choice.id) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func footer(accent: Color) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: tuck ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(tuck ? accent : Color.white.opacity(0.5))
+                Text("Tuck the rest away").font(.system(size: 12, weight: .medium, design: .rounded)).opacity(0.85)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                tuck.toggle()
+                BarSettings.lockInHideOthers = tuck
+            }
+            .help("Minimize the desktop's other windows until you unlock")
+            Spacer(minLength: 8)
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill").font(.system(size: 11, weight: .bold))
+                Text("Lock in").font(.system(size: 13, weight: .bold, design: .rounded))
+            }
+            .foregroundStyle(look.onAccent)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
+            .background(Capsule().fill(accent))
+            .opacity(complete ? 1 : 0.4)
+            .contentShape(Capsule())
+            .onTapGesture { if complete { done(slots.compactMap { id in choices.first { $0.id == id } }) } }
+        }
+    }
+
+    // MARK: Choosing
 
     private func choose(_ count: Int) {
         guard count != layout else { return }
         layout = count
         BarSettings.lockInLayout = count
         slots = Self.guess(count, from: choices)
-        active = slots.firstIndex { $0 == nil } ?? 0
+        selected = Self.firstToFill(slots, layout: count)
     }
 
-    /// Puts a window in the chosen place (swapping, if it's already in another), then moves on to
-    /// the next empty place.
-    private func assign(_ id: CGWindowID) {
-        if let current = slots.firstIndex(of: id) {
-            slots.swapAt(current, active)
-        } else {
-            slots[active] = id
-        }
-        if let empty = slots.firstIndex(where: { $0 == nil }) { active = empty }
+    /// Puts a window in the highlighted place (its window, if any, goes back below), then
+    /// highlights the next empty place.
+    private func put(_ id: CGWindowID) {
+        guard slots.indices.contains(selected) else { return }
+        slots[selected] = id
+        if let empty = slots.firstIndex(where: { $0 == nil }) { selected = empty }
     }
 }
 
-/// One place in the picture of the screen: the chosen window's app, or a gap to fill.
-private struct SlotView: View {
+/// One place on the picture of the screen: the window that will go there, as it looks, with its
+/// app's name; or a gap to fill.
+private struct PlaceView: View {
     let choice: LockIn.Choice?
-    let name: String
-    let active: Bool
+    let picture: CGImage?
+    let selected: Bool
     let accent: Color
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
-        ZStack {
-            shape.fill(Color.white.opacity(choice == nil ? 0.06 : 0.13))
-            VStack(spacing: 3) {
-                if let choice {
-                    if let icon = choice.icon { Image(nsImage: icon).resizable().frame(width: 26, height: 26) }
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        ZStack(alignment: .bottomLeading) {
+            if let choice {
+                // Exactly the place's size, with the window's picture filling it from the top (where its
+                // title bar is) and cut off at the edges.
+                Color(white: 0.2)
+                    .overlay(alignment: .top) {
+                        if let picture {
+                            Image(decorative: picture, scale: 1).resizable().aspectRatio(contentMode: .fill)
+                        } else if let icon = choice.icon {
+                            Image(nsImage: icon).resizable().frame(width: 34, height: 34)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
+                    .clipped()
+                HStack(spacing: 5) {
+                    if let icon = choice.icon { Image(nsImage: icon).resizable().frame(width: 14, height: 14) }
                     Text(choice.app).font(.system(size: 10.5, weight: .semibold, design: .rounded)).lineLimit(1)
-                } else {
-                    Image(systemName: "plus").font(.system(size: 13, weight: .semibold)).opacity(0.55)
-                    Text(name).font(.system(size: 10.5, design: .rounded)).opacity(0.55)
                 }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.black.opacity(0.6)))
+                .padding(6)
+            } else {
+                VStack(spacing: 4) {
+                    Image(systemName: "plus").font(.system(size: 14, weight: .semibold))
+                    Text("Choose a window").font(.system(size: 10.5, weight: .medium, design: .rounded))
+                }
+                .opacity(0.6)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(shape.fill(Color.black.opacity(0.25)))
+                .overlay(shape.strokeBorder(Color.white.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
             }
-            .padding(4)
         }
-        .overlay(shape.strokeBorder(active ? accent : Color.white.opacity(0.16), lineWidth: active ? 2 : 1))
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(selected ? accent : Color.white.opacity(0.14), lineWidth: selected ? 2 : 1))
+        .shadow(color: selected ? accent.opacity(0.55) : .black.opacity(0.35), radius: selected ? 8 : 4)
         .contentShape(shape)
     }
 }
 
-/// A small picture of a layout, for choosing it.
-private struct LayoutButton: View {
+/// A window waiting below the picture of the screen.
+private struct WindowCard: View {
+    let choice: LockIn.Choice
+    let picture: CGImage?
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        VStack(alignment: .leading, spacing: 5) {
+            Color(white: 0.2)
+                .overlay(alignment: .top) {
+                    if let picture {
+                        Image(decorative: picture, scale: 1).resizable().aspectRatio(contentMode: .fill)
+                    } else if let icon = choice.icon {
+                        Image(nsImage: icon).resizable().frame(width: 26, height: 26)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .frame(width: 96, height: 60)
+                .clipShape(shape)
+            .overlay(shape.strokeBorder(Color.white.opacity(hovering ? 0.5 : 0.12), lineWidth: 1))
+            HStack(spacing: 4) {
+                if let icon = choice.icon { Image(nsImage: icon).resizable().frame(width: 13, height: 13) }
+                Text(choice.title ?? choice.app).font(.system(size: 10.5, weight: .medium, design: .rounded)).lineLimit(1)
+            }
+            .frame(width: 96, alignment: .leading)
+            .opacity(0.85)
+        }
+        .scaleEffect(hovering ? 1.04 : 1)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
+/// A small outline picture of a layout, for choosing it.
+private struct LayoutChip: View {
     let places: [CGRect]
     let selected: Bool
     let accent: Color
 
     var body: some View {
-        let width: CGFloat = 30, height: CGFloat = 18
+        let width: CGFloat = 26, height: CGFloat = 17
         ZStack(alignment: .topLeading) {
             ForEach(Array(places.enumerated()), id: \.offset) { _, place in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(selected ? accent : Color.white.opacity(0.45))
+                    .fill(selected ? Color.white.opacity(0.95) : Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .strokeBorder(Color.white.opacity(selected ? 0 : 0.6), lineWidth: 1.2))
                     .frame(width: place.width * width, height: place.height * height)
                     .offset(x: place.minX * width, y: place.minY * height)
             }
         }
         .frame(width: width, height: height, alignment: .topLeading)
-        .padding(5)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(selected ? 0.16 : 0.001)))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(selected ? accent : Color.clear))
         .contentShape(Rectangle())
-    }
-}
-
-private struct PickerRow: View {
-    let choice: LockIn.Choice
-    /// Where it goes, once chosen ("Left", "Top"…).
-    let place: String?
-    let look: BarLook
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            if let icon = choice.icon {
-                Image(nsImage: icon).resizable().frame(width: 22, height: 22)
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                Text(choice.app).font(.system(size: 13, weight: .semibold, design: .rounded)).lineLimit(1)
-                if let title = choice.title, !title.isEmpty {
-                    Text(title).font(.system(size: 11, design: .rounded)).opacity(0.65).lineLimit(1)
-                }
-            }
-            Spacer(minLength: 0)
-            if let place {
-                Text(place)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(look.onAccent)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color(nsColor: look.accent)))
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(place != nil ? 0.16 : hovering ? 0.1 : 0)))
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: action)
     }
 }

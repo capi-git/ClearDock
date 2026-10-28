@@ -44,7 +44,7 @@ final class LockIn {
     var accent: (NSScreen, UInt64) -> NSColor = { _, _ in .systemPurple }
     /// Asks you to choose two of the windows (left, then right) or three (top left, bottom left,
     /// then the big one), and calls back with them, or with nil if you don't.
-    var choose: (_ choices: [Choice], _ screen: NSScreen, _ done: @escaping ([Choice]?) -> Void) -> Void = { _, _, done in done(nil) }
+    var choose: (_ choices: [Choice], _ title: String, _ screen: NSScreen, _ done: @escaping ([Choice]?) -> Void) -> Void = { _, _, _, done in done(nil) }
     /// Closes the chooser if it's open.
     var dismissChooser: () -> Void = {}
 
@@ -116,6 +116,13 @@ final class LockIn {
 
     /// Locks in the desktop: straight away when its windows fit the layout, otherwise (or when
     /// `alwaysChoose` says so) once you've chosen in the picker.
+    /// For checking how the chooser looks: the windows it would offer on the desktop showing on
+    /// `screen`, and that desktop's name.
+    func choicesForChecking(on screen: NSScreen) -> (choices: [Choice], title: String)? {
+        guard let desktop = Self.currentDesktop(on: screen) else { return nil }
+        return (Self.windows(on: desktop).choices, BarSettings.desktopNames[desktop.key] ?? "Desktop \(desktop.number)")
+    }
+
     private func lock(_ desktop: Desktop, on screen: NSScreen, alwaysChoose: Bool = false) {
         guard AXIsProcessTrusted() else {
             Self.explain("Lock-in needs Accessibility permission",
@@ -143,7 +150,8 @@ final class LockIn {
         do {
             choosing = desktop.id
             onChange()
-            choose(windows, screen) { [weak self] picked in
+            let title = BarSettings.desktopNames[desktop.key] ?? "Desktop \(desktop.number)"
+            choose(windows, title, screen) { [weak self] picked in
                 guard let self, self.choosing == desktop.id else { return }
                 self.choosing = nil
                 self.onChange()
@@ -1387,7 +1395,7 @@ final class CalmBackdrop {
     }
 
     /// The wallpaper as it looks (a live one included, as it is right now), small, blurred and dimmed.
-    nonisolated private static func calmPicture(display: CGDirectDisplayID?, size: CGSize) async -> CGImage? {
+    nonisolated static func calmPicture(display: CGDirectDisplayID?, size: CGSize) async -> CGImage? {
         guard CGPreflightScreenCaptureAccess(),
               let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
               let display = content.displays.first(where: { $0.displayID == display }) ?? content.displays.first else { return nil }

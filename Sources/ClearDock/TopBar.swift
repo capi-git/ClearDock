@@ -357,12 +357,12 @@ final class TopBarController {
             // after a switch.
             return self.model.look(for: key, desktop: space).accent
         }
-        lockIn.choose = { [weak self] choices, screen, done in
+        lockIn.choose = { [weak self] choices, title, screen, done in
             guard let self else { return done(nil) }
             self.popover.hide()
             let bottom = screen.displayID.flatMap { self.panels[$0]?.panel.frame.minY } ?? screen.visibleFrame.maxY
             let key = self.model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
-            self.lockInPicker.show(choices, look: self.model.look(for: key), below: bottom, on: screen, done: done)
+            self.lockInPicker.show(choices, title: title, look: self.model.look(for: key), below: bottom, on: screen, done: done)
         }
         lockIn.dismissChooser = { [weak self] in self?.lockInPicker.close() }
         model.toggleLockIn = { [weak self] in self?.lockIn.toggle() }
@@ -376,7 +376,31 @@ final class TopBarController {
         NotificationCenter.default.addObserver(forName: BarSettings.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.settingsChanged() }
         }
+        // For checking how the lock-in chooser looks (only with the debug.snapshots setting on).
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.cleardock.debug.picker"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showPickerForChecking() }
+        }
         settingsChanged()
+    }
+
+    /// Opens the lock-in chooser for the desktop showing, saves a picture of it, and closes it again
+    /// without locking anything in.
+    private func showPickerForChecking() {
+        guard UserDefaults.standard.bool(forKey: "debug.snapshots"), let screen = NSScreen.main,
+              let found = lockIn.choicesForChecking(on: screen), !found.choices.isEmpty else { return }
+        let bottom = screen.displayID.flatMap { panels[$0]?.panel.frame.minY } ?? screen.visibleFrame.maxY
+        let key = model.desktops.keys.contains("Main") ? "Main" : (screen.displayUUID ?? "Main")
+        lockInPicker.show(found.choices, title: found.title, look: model.look(for: key), below: bottom, on: screen) { _ in }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let number = self.lockInPicker.windowNumber
+                Task { @MainActor in
+                    await DebugSnapshot.capture(window: number, name: "picker")
+                    self.lockInPicker.close()
+                }
+            }
+        }
     }
 
     /// Clear Dock is quitting: put back the windows lock-in mode tucked away.
