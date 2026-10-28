@@ -1,5 +1,5 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import ScreenCaptureKit
 import Synchronization
 import os
@@ -153,6 +153,14 @@ enum WindowFocus {
         }
     }
 
+    /// Brings forward a window already in hand, on the desktop showing (minimized or not), without
+    /// asking its app for its windows again: right after it's been asked to do something else, a
+    /// busy app can take a while to answer.
+    static func raise(_ window: AXUIElement, id windowID: CGWindowID, of pid: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        focus(windowID, of: app, window: window)
+    }
+
     /// The ordinary desktop a window is on, when it isn't showing and is on the display under
     /// the pointer (the one the desktop shortcuts act on).
     nonisolated private static func desktop(holding windowID: CGWindowID, onDisplay pointer: String?) -> Desktop? {
@@ -181,13 +189,21 @@ enum WindowFocus {
         NSApp.yieldActivation(to: app)
 
         // Put the chosen window on top of the app's others first, so it's the one that comes forward.
-        var activated = false
+        // That's asked of the app off the main thread: one bringing a window back from the Dock is
+        // busy animating it for a moment, and only answers the rest once it's done.
         if let window {
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            activated = app.activate()
-        } else if AXIsProcessTrusted(), bringForward(windowID, of: pid) {
+            DispatchQueue.global(qos: .userInteractive).async {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { cameForward(windowID, of: app, found: true, activated: app.activate()) }
+                }
+            }
+            return
+        }
+        var activated = false
+        if AXIsProcessTrusted(), bringForward(windowID, of: pid) {
             // Most apps only list the windows on the desktop you're on, so one on another desktop
             // can't be found that way: the window server is asked to bring it forward, going to its
             // desktop. macOS doesn't always allow that, so the app is brought forward as well, which
@@ -197,7 +213,12 @@ enum WindowFocus {
             if !AXIsProcessTrusted() { showAccessibilitySettingsOnce() }
             activated = app.activate()
         }
-        previewLog.notice("Preview click: window \(windowID) of \(app.localizedName ?? "?", privacy: .public); found window: \(window != nil); accessibility: \(AXIsProcessTrusted()); activated: \(activated)")
+        cameForward(windowID, of: app, found: false, activated: activated)
+    }
+
+    private static func cameForward(_ windowID: CGWindowID, of app: NSRunningApplication, found: Bool, activated: Bool) {
+        let pid = app.processIdentifier
+        previewLog.notice("Preview click: window \(windowID) of \(app.localizedName ?? "?", privacy: .public); found window: \(found); accessibility: \(AXIsProcessTrusted()); activated: \(activated)")
 
         // If macOS didn't let the app come forward, open it the way a Dock click does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {

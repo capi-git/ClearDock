@@ -410,10 +410,13 @@ final class TopBarController {
 
     private func lockInForChecking(_ pid: pid_t) {
         guard UserDefaults.standard.bool(forKey: "debug.snapshots"), lockIn.lockForChecking(pid: pid) else { return }
-        // Locked in for `debug.lockinSeconds` (2.5 unless set), with a picture taken 2.5 seconds in.
+        // Locked in for `debug.lockinSeconds` (2.5 unless set), with a picture taken 2.5 seconds in
+        // unless `debug.lockinNoPicture` is set.
         let seconds = max(2.5, UserDefaults.standard.double(forKey: "debug.lockinSeconds"))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            Task { @MainActor in await DebugSnapshot.captureScreen(name: "lockin") }
+        if !UserDefaults.standard.bool(forKey: "debug.lockinNoPicture") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                Task { @MainActor in await DebugSnapshot.captureScreen(name: "lockin") }
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.5) { [weak self] in
             MainActor.assumeIsolated { self?.lockIn.unlockForChecking() }

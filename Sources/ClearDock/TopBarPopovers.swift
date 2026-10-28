@@ -592,6 +592,8 @@ final class LockInPicker {
 final class BarNote {
     private let panel = PopoverPanel()
     private var hideWork: DispatchWorkItem?
+    /// Counts the notes shown, so a fade that ends after the next note came doesn't take it away.
+    private var shown = 0
 
     init() {
         panel.onEnter = { [weak self] in self?.hideWork?.cancel() }
@@ -604,6 +606,7 @@ final class BarNote {
             keep()
             self?.fade(after: 0)
         } }
+        shown += 1
         panel.setContent(AnyView(BarNoteView(text: text, icon: icon, look: look, keep: action)))
         let size = panel.fittingSize
         let x = (screen.frame.midX - size.width / 2).rounded()
@@ -612,10 +615,11 @@ final class BarNote {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
             BarSpace.add(panel)
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                panel.animator().alphaValue = 1
-            }
+        }
+        // Also back from partway through fading, when the last one was going.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            panel.animator().alphaValue = 1
         }
         // Longer with a button, to give time to reach for it.
         fade(after: keep == nil ? 3 : 6)
@@ -632,12 +636,13 @@ final class BarNote {
 
     private func fade() {
         hideWork = nil
-        let panel = self.panel
+        let panel = self.panel, note = shown
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.3
             panel.animator().alphaValue = 0
-        }, completionHandler: {
+        }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
+                guard let self, self.shown == note else { return }
                 panel.orderOut(nil)
                 panel.setContent(nil)
             }

@@ -125,9 +125,9 @@ final class LockIn {
         let mine = Self.windows(on: desktop).choices.filter { $0.pid == pid }
         guard !mine.isEmpty else { return false }
         checkingSpace = desktop.id
-        start(Self.arranged(Array(mine.prefix(3))), of: mine, hiding: [], on: desktop.id, screen: screen)
         // Only another copy of the same app opening meanwhile is dealt with; your own windows stay put.
-        sessions[desktop.id]?.checkingApp = NSRunningApplication(processIdentifier: pid)?.executableURL
+        start(Self.arranged(Array(mine.prefix(3))), of: mine, hiding: [], on: desktop.id, screen: screen,
+              checking: NSRunningApplication(processIdentifier: pid)?.executableURL)
         return sessions[desktop.id] != nil
     }
 
@@ -211,12 +211,14 @@ final class LockIn {
 
     /// Locks in one, two or three of the desktop's windows; the rest of `all` are tucked away
     /// (apart from apps left alone), and the apps in `apart` hidden, if that's on.
-    private func start(_ picked: [Choice], of all: [Choice], hiding apart: Set<pid_t>, on space: UInt64, screen: NSScreen) {
+    private func start(_ picked: [Choice], of all: [Choice], hiding apart: Set<pid_t>, on space: UInt64, screen: NSScreen,
+                       checking app: URL? = nil) {
         guard (1...3).contains(picked.count), Set(picked.map(\.id)).count == picked.count,
               let display = screen.displayID, sessions[space] == nil else { return }
         restoreWaiting(on: space)
         let session = LockInSession(space: space, display: display,
                                     panes: picked.map { LockInSession.Pane(pid: $0.pid, element: $0.element, id: $0.id) })
+        session.checkingApp = app
         session.accent = { [weak self, weak session] in
             guard let self, let session, let screen = session.screen else { return .systemPurple }
             return self.accent(screen, session.space)
@@ -555,7 +557,7 @@ final class LockIn {
 
     // MARK: Helpers
 
-    private static func unminimize(_ windows: [AXUIElement]) {
+    static func unminimize(_ windows: [AXUIElement]) {
         for window in windows {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
@@ -569,12 +571,12 @@ final class LockIn {
         alert.runModal()
     }
 
-    fileprivate static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    nonisolated fileprivate static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
     }
 
-    fileprivate static func frame(of window: AXUIElement) -> CGRect? {
+    nonisolated fileprivate static func frame(of window: AXUIElement) -> CGRect? {
         guard let position = attribute(window, kAXPositionAttribute), let size = attribute(window, kAXSizeAttribute),
               CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
@@ -696,8 +698,12 @@ private final class LockInSession {
 
     /// Puts the windows back where they were before lock-in (any that are still open).
     func putBack() {
+        // Only to where a screen still is (one may have been unplugged since), in window coordinates.
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        let screens = NSScreen.screens.map { CGRect(x: $0.frame.minX, y: mainHeight - $0.frame.maxY, width: $0.frame.width, height: $0.frame.height) }
         for pane in panes where !minimized.contains(pane.id) {
-            guard let frame = startingFrames[pane.id], LockIn.frame(of: pane.element) != nil else { continue }
+            guard let frame = startingFrames[pane.id], LockIn.frame(of: pane.element) != nil,
+                  screens.contains(where: { $0.intersection(frame).width >= 120 && $0.intersection(frame).height >= 80 }) else { continue }
             Self.setSize(pane.element, frame.size)
             Self.setPosition(pane.element, frame.origin)
             Self.setSize(pane.element, frame.size)
@@ -716,6 +722,8 @@ private final class LockInSession {
 
     /// Brings back the one of the two you were using.
     private func raiseLastUsed() {
+        // Checking lock-in never takes the keyboard from what you're using.
+        guard checkingApp == nil else { return }
         let pane = panes[min(lastUsed, panes.count - 1)]
         WindowFocus.raise(pane.id, of: pane.pid)
     }
@@ -730,7 +738,7 @@ private final class LockInSession {
         // Then make room for an app that wouldn't go as narrow as its share.
         scheduleSettle()
         // Bring one forward (the left one, or the big one), unless you're already using one of them.
-        if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, !involves(front) {
+        if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, !involves(front), checkingApp == nil {
             let main = panes[stacked ? 2 : 0]
             WindowFocus.raise(main.id, of: main.pid)
         }
@@ -758,12 +766,16 @@ private final class LockInSession {
     }
 
     func tuck(_ windows: [AXUIElement]) {
-        var tried: [(window: AXUIElement, pid: pid_t)] = []
-        for window in windows where AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+        var tried: [AwayWindow] = []
+        for window in windows {
+            // Its number first, while its app isn't busy minimizing it.
+            let id = AppWindowList.windowID(of: window)
+            guard AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success else { continue }
             tucked.append(window)
-            if let id = AppWindowList.windowID(of: window) { putAway.insert(id) }
+            guard let id else { continue }
+            putAway.insert(id)
             var pid: pid_t = 0
-            if AXUIElementGetPid(window, &pid) == .success { tried.append((window, pid)) }
+            if AXUIElementGetPid(window, &pid) == .success { tried.append(AwayWindow(window: window, pid: pid, id: id)) }
         }
         // Those that can't be minimized go with their app, hidden.
         afterMinimizing(tried) { [weak self] stuck in
@@ -1134,7 +1146,7 @@ private final class LockInSession {
     /// between screens), or else the next one you go to on this screen (macOS doesn't let apps move
     /// windows between desktops, so it's minimized until you get there, and comes back there).
     func moveNewcomers() {
-        guard !ended, !dragging, showing else { return }
+        guard !ended, !dragging, showing, !arriving else { return }
         // Nothing on screen has changed since the last look: nothing new can have opened. (Every
         // fourth time it looks anyway, for a window that was still fading in or growing then.)
         let numbers = OnScreenWindows.numbers().sorted()
@@ -1169,17 +1181,86 @@ private final class LockInSession {
             screen.displayID != display
                 && WindowSpaces.currentSpaceID(on: screen).map(LockIn.lockedSpaces.contains) != true
         }
-        var tuckedAny = false, hidAny = false
+        // Where on the other screen they'd go, in window coordinates.
+        let room = elsewhere.map { screen -> CGRect in
+            let room = screen.visibleFrame.insetBy(dx: 40, dy: 40)
+            return CGRect(x: room.minX, y: mainHeight - room.maxY, width: room.width, height: room.height)
+        }
+        // The apps are asked about their windows, and the windows moved, off the main thread: an
+        // app that's just opened can be slow to answer, and nothing on screen should wait for it.
+        arriving = true
+        let work = found.map { (pid: $0.key, ids: $0.value) }
+        Self.arrivals.async { [weak self] in
+            let arrivals = work.map { Self.deal(with: $0.pid, windows: $0.ids, room: room) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.arrived(arrivals) }
+            }
+        }
+    }
+
+    /// One app's new windows on the desktop, and what was done with them.
+    private struct Arrival: @unchecked Sendable {
+        let pid: pid_t
+        /// Whether the app listed its windows: one that doesn't can only be hidden.
+        var listed = false
+        var moved = false
+        /// Those minimized, to open on the next desktop.
+        var sent: [AwayWindow] = []
+    }
+
+    /// A window lock-in minimized, with its app and its number.
+    struct AwayWindow: @unchecked Sendable {
+        let window: AXUIElement
+        let pid: pid_t
+        let id: CGWindowID
+    }
+
+    /// Asked of one app at a time, in turn, off the main thread.
+    nonisolated private static let arrivals = DispatchQueue(label: "Clear Dock lock-in arrivals", qos: .userInitiated)
+    /// Whether apps are being asked about new windows right now; the next look waits till they've answered.
+    private var arriving = false
+
+    /// Moves the app's windows `ids` to `room` on the other screen, or minimizes them when there's
+    /// no other screen to go to.
+    nonisolated private static func deal(with pid: pid_t, windows ids: Set<CGWindowID>, room: CGRect?) -> Arrival {
+        var arrival = Arrival(pid: pid)
+        let app = AXUIElementCreateApplication(pid)
+        // Never wait long on an app that's busy.
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        let windows = (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        guard !windows.isEmpty else { return arrival }
+        arrival.listed = true
+        for window in windows {
+            AXUIElementSetMessagingTimeout(window, 0.3)
+            guard let id = AppWindowList.windowID(of: window), ids.contains(id),
+                  (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole else { continue }
+            if let room {
+                if let frame = LockIn.frame(of: window), frame.width > room.width || frame.height > room.height {
+                    setSize(window, CGSize(width: min(frame.width, room.width), height: min(frame.height, room.height)))
+                }
+                setPosition(window, room.origin)
+                arrival.moved = true
+            } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
+                arrival.sent.append(AwayWindow(window: window, pid: pid, id: id))
+            }
+        }
+        return arrival
+    }
+
+    /// Back on the main thread, after the apps with new windows have been dealt with.
+    private func arrived(_ arrivals: [Arrival]) {
+        arriving = false
+        let sentWindows = arrivals.flatMap(\.sent)
+        // Unlocked meanwhile: what went away comes straight back.
+        guard !ended else { return LockIn.unminimize(sentWindows.map(\.window)) }
+        var hidAny = false
         var moved: [NSRunningApplication] = [], hidden: [NSRunningApplication] = []
-        var sentWindows: [(window: AXUIElement, pid: pid_t)] = []
-        for (pid, ids) in found {
+        for arrival in arrivals {
+            let pid = arrival.pid
             let running = NSRunningApplication(processIdentifier: pid)
-            let app = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(app, 0.3)
-            let windows = (LockIn.attribute(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
             // Apps that can't be moved one window at a time are hidden instead. (Games starting up
-            // were left alone above: it may be a match you're joining.)
-            if windows.isEmpty {
+            // were left alone: it may be a match you're joining.)
+            if !arrival.listed {
                 if hiddenApps.contains(pid) {
                     // Hidden once already, and you've brought it back: you want it here.
                     keptApps.insert(pid)
@@ -1190,24 +1271,13 @@ private final class LockInSession {
                 }
                 continue
             }
-            for window in windows {
-                guard let id = AppWindowList.windowID(of: window), ids.contains(id),
-                      (LockIn.attribute(window, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole else { continue }
-                if let elsewhere {
-                    let room = elsewhere.visibleFrame.insetBy(dx: 40, dy: 40)
-                    if let frame = LockIn.frame(of: window), frame.width > room.width || frame.height > room.height {
-                        Self.setSize(window, CGSize(width: min(frame.width, room.width), height: min(frame.height, room.height)))
-                    }
-                    Self.setPosition(window, CGPoint(x: room.minX, y: mainHeight - room.maxY))
-                    if let running, !moved.contains(running) { moved.append(running) }
-                } else if AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success {
-                    putAway.insert(id)
-                    onSendAway(window)
-                    sentWindows.append((window, pid))
-                    tuckedAny = true
-                }
+            if arrival.moved, let running, !moved.contains(running) { moved.append(running) }
+            for away in arrival.sent {
+                putAway.insert(away.id)
+                onSendAway(away.window)
             }
         }
+        let tuckedAny = !sentWindows.isEmpty
         // An app whose window was just tucked away is still the one in front: go back to the two.
         if tuckedAny { raiseLastUsed() }
         if tuckedAny || hidAny { onPutAway() }
@@ -1226,8 +1296,8 @@ private final class LockInSession {
                     }
                     self.onPutAway()
                 } else {
-                    for (window, _) in stuck { if let id = AppWindowList.windowID(of: window) { self.keptWindows.insert(id) } }
-                    sent.removeAll { entry in stuck.contains { CFEqual($0.window, entry.window) } }
+                    self.keptWindows.formUnion(stuck.map(\.id))
+                    sent.removeAll { entry in stuck.contains { $0.id == entry.id } }
                 }
             }
             self.tell(sent: sent, moved: moved, hidden: hidden)
@@ -1237,27 +1307,27 @@ private final class LockInSession {
     /// Some windows can't be minimized: macOS says it's done, and nothing happens. A moment later
     /// (minimizing takes that long to show), `then` is given those still showing, which no longer
     /// count as put away.
-    private func afterMinimizing(_ windows: [(window: AXUIElement, pid: pid_t)],
-                                 then: @escaping ([(window: AXUIElement, pid: pid_t)]) -> Void) {
+    private func afterMinimizing(_ windows: [AwayWindow], then: @escaping ([AwayWindow]) -> Void) {
         guard !windows.isEmpty else { return then([]) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, !self.ended else { return }
-                let stuck = windows.filter { (LockIn.attribute($0.window, kAXMinimizedAttribute) as? Bool) != true }
-                for (window, _) in stuck {
-                    if let id = AppWindowList.windowID(of: window) { self.putAway.remove(id) }
+        // The apps are asked off the main thread, as when the windows were minimized.
+        Self.arrivals.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            let stuck = windows.filter { (LockIn.attribute($0.window, kAXMinimizedAttribute) as? Bool) != true }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, !self.ended else { return }
+                    self.putAway.subtract(stuck.map(\.id))
+                    then(stuck)
                 }
-                then(stuck)
             }
         }
     }
 
     /// Says under the bar what was just done with windows that opened here, with a button that
     /// undoes it, for an app you opened on purpose.
-    private func tell(sent: [(window: AXUIElement, pid: pid_t)], moved: [NSRunningApplication], hidden: [NSRunningApplication]) {
+    private func tell(sent: [AwayWindow], moved: [NSRunningApplication], hidden: [NSRunningApplication]) {
         var apps: [NSRunningApplication] = []
-        for (_, pid) in sent {
-            if let app = NSRunningApplication(processIdentifier: pid), !apps.contains(app) { apps.append(app) }
+        for away in sent {
+            if let app = NSRunningApplication(processIdentifier: away.pid), !apps.contains(app) { apps.append(app) }
         }
         let keep: () -> Void = { [weak self] in self?.keepHere(sent, apps: hidden) }
         if let app = apps.first {
@@ -1274,19 +1344,21 @@ private final class LockInSession {
 
     /// Brings back windows just sent away and apps just hidden, as asked from the note: they stay
     /// here, in front of the locked-in windows, until you unlock.
-    private func keepHere(_ windows: [(window: AXUIElement, pid: pid_t)], apps: [NSRunningApplication]) {
+    private func keepHere(_ windows: [AwayWindow], apps: [NSRunningApplication]) {
         guard !ended else { return }
-        for (window, _) in windows {
-            if let id = AppWindowList.windowID(of: window) { keptWindows.insert(id) }
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-        }
+        keptWindows.formUnion(windows.map(\.id))
         if !windows.isEmpty { onKeep(windows.map(\.window)) }
         for app in apps {
             keptApps.insert(app.processIdentifier)
             app.unhide()
         }
-        if let (window, pid) = windows.first, let id = AppWindowList.windowID(of: window) {
-            WindowFocus.raise(id, of: pid)
+        if let first = windows.first {
+            // Brought forward, which brings it back; any others once it's back, so the app isn't
+            // asked while it's busy bringing it back.
+            WindowFocus.raise(first.window, id: first.id, of: first.pid)
+            let rest = windows.dropFirst().map(\.window)
+            guard !rest.isEmpty else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { LockIn.unminimize(rest) }
         } else if let app = apps.first {
             app.activate()
         }
@@ -1439,12 +1511,12 @@ private final class LockInSession {
         abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 16 && abs(a.height - b.height) < 16
     }
 
-    private static func setSize(_ window: AXUIElement, _ size: CGSize) {
+    nonisolated private static func setSize(_ window: AXUIElement, _ size: CGSize) {
         var size = size
         if let value = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value) }
     }
 
-    private static func setPosition(_ window: AXUIElement, _ point: CGPoint) {
+    nonisolated private static func setPosition(_ window: AXUIElement, _ point: CGPoint) {
         var point = point
         if let value = AXValueCreate(.cgPoint, &point) { AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) }
     }
