@@ -117,8 +117,6 @@ final class LockIn {
         saveLeftovers()
     }
 
-    /// Locks in the desktop: straight away when its windows fit the layout, otherwise (or when
-    /// `alwaysChoose` says so) once you've chosen in the picker.
     /// For checking how lock-in looks: locks in the windows of the app `pid` on the desktop showing
     /// on the main screen, tucking nothing else away. False if that can't be done.
     func lockForChecking(pid: pid_t) -> Bool {
@@ -127,6 +125,8 @@ final class LockIn {
         guard !mine.isEmpty else { return false }
         checkingSpace = desktop.id
         start(Self.arranged(Array(mine.prefix(3))), of: mine, hiding: [], on: desktop.id, screen: screen)
+        // Your own windows opening meanwhile stay where they are.
+        sessions[desktop.id]?.leavesOthersAlone = true
         return sessions[desktop.id] != nil
     }
 
@@ -146,6 +146,8 @@ final class LockIn {
         return (Self.windows(on: desktop).choices, BarSettings.desktopNames[desktop.key] ?? "Desktop \(desktop.number)")
     }
 
+    /// Locks in the desktop: straight away when its windows fit the layout, otherwise (or when
+    /// `alwaysChoose` says so) once you've chosen in the picker.
     private func lock(_ desktop: Desktop, on screen: NSScreen, alwaysChoose: Bool = false) {
         guard AXIsProcessTrusted() else {
             Self.explain("Lock-in needs Accessibility permission",
@@ -654,6 +656,10 @@ private final class LockInSession {
     private var holding = false
     /// How narrow each app has shown it will go, by window, for those that won't go as narrow as asked.
     private var minimumWidths: [CGWindowID: CGFloat] = [:]
+    /// How big each app has shown it will go, by window, for those that won't fill their place.
+    private var largestSizes: [CGWindowID: CGSize] = [:]
+    /// Where each window was found the last time it needed fitting.
+    private var lastFound: [CGWindowID: CGRect] = [:]
 
     private static let windowNotifications = [kAXWindowMovedNotification, kAXWindowResizedNotification, kAXUIElementDestroyedNotification,
                                               kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
@@ -755,6 +761,8 @@ private final class LockInSession {
     /// Windows, and apps (lock-in hid them, as it can't see their windows), you brought back.
     private var keptWindows = Set<CGWindowID>()
     private var keptApps = Set<pid_t>()
+    /// Only for checking lock-in's look: other apps' windows opening on the desktop are left be.
+    var leavesOthersAlone = false
 
     func refit() {
         guard !ended, !dragging else { return }
@@ -820,17 +828,44 @@ private final class LockInSession {
     }
 
     private func fit() {
-        let goals = targets
-        for (pane, target) in zip(panes, goals) where !minimized.contains(pane.id) {
-            guard let frame = LockIn.frame(of: pane.element), !Self.close(frame, target) else { continue }
+        let places = targets
+        for (pane, place) in zip(panes, places) where !minimized.contains(pane.id) {
+            guard let frame = LockIn.frame(of: pane.element) else { continue }
+            // Bigger than it was thought to go: it can fill its place after all.
+            if let largest = largestSizes[pane.id], frame.width > largest.width + 16 || frame.height > largest.height + 16 {
+                largestSizes[pane.id] = nil
+            }
+            var target = placed(place, for: pane.id)
+            guard !Self.close(frame, target) else { continue }
+            // Found short of its place just as the last fit left it: it won't grow any bigger, so
+            // it goes in the middle of its place from now on, and isn't asked again.
+            if let last = lastFound[pane.id], Self.close(last, frame), last.size == frame.size,
+               frame.width < target.width - 16 || frame.height < target.height - 16 {
+                largestSizes[pane.id] = CGSize(width: frame.width < target.width - 16 ? frame.width : .greatestFiniteMagnitude,
+                                               height: frame.height < target.height - 16 ? frame.height : .greatestFiniteMagnitude)
+                target = placed(place, for: pane.id)
+                if Self.close(frame, target) { continue }
+            }
+            lastFound[pane.id] = frame
             lockInLog.notice("Lock-in: fitting a window from \(String(describing: frame), privacy: .public) to \(String(describing: target), privacy: .public)")
             // Size, place, and size again: some apps only accept a size that fits where they are.
             Self.setSize(pane.element, target.size)
             Self.setPosition(pane.element, target.origin)
             Self.setSize(pane.element, target.size)
         }
-        if goals.count == panes.count { knownFrames = goals }
+        if places.count == panes.count { knownFrames = placed(places) }
         updateDecorations()
+    }
+
+    /// Where a window goes in its place: all of it, or the middle of it for one that won't grow that big.
+    private func placed(_ place: CGRect, for id: CGWindowID) -> CGRect {
+        guard let largest = largestSizes[id] else { return place }
+        let size = CGSize(width: min(place.width, largest.width), height: min(place.height, largest.height))
+        return CGRect(x: (place.midX - size.width / 2).rounded(), y: (place.midY - size.height / 2).rounded(), width: size.width, height: size.height)
+    }
+
+    private func placed(_ places: [CGRect]) -> [CGRect] {
+        zip(panes, places).map { placed($1, for: $0.id) }
     }
 
     /// After you've moved or resized one of them yourself: an inner edge dragged sets how they
@@ -1045,7 +1080,8 @@ private final class LockInSession {
         // Now the apps resize, once each, out of sight under the covers.
         overlay?.move(goals.map(Self.flipped))
         drawnFrames = goals
-        for (mover, goal) in zip(movers, goals) { mover.move(to: goal) }
+        let inPlace = placed(goals)
+        for (mover, goal) in zip(movers, inPlace) { mover.move(to: goal) }
         let thisDrag = drag
         WindowMover.whenIdle(movers) { [weak self] in
             // A moment for the apps to draw at their new size before the covers lift.
@@ -1056,8 +1092,8 @@ private final class LockInSession {
                     // The glow and the edge go where the windows were put, straight away, without
                     // asking the apps; a look a moment later makes room for one that wouldn't go
                     // as narrow as asked.
-                    self.knownFrames = goals
-                    self.updateDecorations(goals)
+                    self.knownFrames = inPlace
+                    self.updateDecorations(inPlace)
                     overlay?.finish()
                     self.scheduleSettle()
                 }
@@ -1079,7 +1115,7 @@ private final class LockInSession {
     /// between screens), or else the next one you go to on this screen (macOS doesn't let apps move
     /// windows between desktops, so it's minimized until you get there, and comes back there).
     func moveNewcomers() {
-        guard !ended, !dragging, showing else { return }
+        guard !ended, !dragging, showing, !leavesOthersAlone else { return }
         // Nothing on screen has changed since the last look: nothing new can have opened. (Every
         // fourth time it looks anyway, for a window that was still fading in or growing then.)
         let numbers = OnScreenWindows.numbers().sorted()
@@ -1258,10 +1294,15 @@ private final class LockInSession {
             divider.orderOut(nil)
             return rowDivider.orderOut(nil)
         }
-        // The edges, a little over each window, so they're easy to take hold of.
+        // The edges, a little over each window, so they're easy to take hold of. Beside a window
+        // that won't fill its place, the edge goes where the places meet.
         let overlap = DividerPanel.overlap
+        let places = targets
+        let edges = places.count == frames.count
+            ? zip(panes, zip(frames, places)).map { pane, both in largestSizes[pane.id] == nil ? both.0 : both.1 }
+            : frames
         // Upright: between the left and the right, or between the stack and the big one.
-        let left = stacked ? frames[0].union(frames[1]) : frames[0], right = frames[stacked ? 2 : 1]
+        let left = stacked ? edges[0].union(edges[1]) : edges[0], right = edges[stacked ? 2 : 1]
         let top = max(left.minY, right.minY), bottom = min(left.maxY, right.maxY)
         if right.minX >= left.maxX - 1, bottom - top > 60 {
             divider.show(at: flipped(CGRect(x: left.maxX - overlap, y: top, width: right.minX - left.maxX + overlap * 2, height: bottom - top)))
@@ -1270,7 +1311,7 @@ private final class LockInSession {
         }
         // Across: between the two stacked ones.
         guard stacked else { return rowDivider.orderOut(nil) }
-        let upper = frames[0], lower = frames[1]
+        let upper = edges[0], lower = edges[1]
         let start = max(upper.minX, lower.minX), end = min(upper.maxX, lower.maxX)
         if lower.minY >= upper.maxY - 1, end - start > 60 {
             rowDivider.show(at: flipped(CGRect(x: start, y: upper.maxY - overlap, width: end - start, height: lower.minY - upper.maxY + overlap * 2)))
