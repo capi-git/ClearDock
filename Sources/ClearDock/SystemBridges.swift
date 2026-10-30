@@ -145,6 +145,73 @@ enum WindowSpaces {
     }
 }
 
+/// Keeps Clear Dock's windows that belong on every desktop (the dock, its labels and previews) on
+/// every desktop. macOS can tie one to a single desktop: leaving a full-screen app, it puts the
+/// windows that were over it back on the desktop the app came from, and a window allowed over
+/// full-screen apps, like the dock, can go with them, missing from every other desktop after that.
+@MainActor
+enum EveryDesktop {
+    private static var pending: DispatchWorkItem?
+
+    /// Looks a moment after the desktop changes, once any full-screen app has finished leaving.
+    static func checkSoon() {
+        pending?.cancel()
+        let work = DispatchWorkItem { MainActor.assumeIsolated { check(repairing: true) } }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)
+    }
+
+    private static func check(repairing: Bool) {
+        let numbers = NSApp.windows.filter { $0.collectionBehavior.contains(.canJoinAllSpaces) && $0.windowNumber > 0 }
+            .map { CGWindowID($0.windowNumber) }
+        guard !numbers.isEmpty else { return }
+        // The window server is asked off the main thread.
+        DispatchQueue.global(qos: .utility).async {
+            let desktops = Set(WindowSpaces.displaySpaces().flatMap { display in
+                ((display["Spaces"] as? [[String: Any]]) ?? []).compactMap { space -> UInt64? in
+                    // Ordinary desktops only, not full-screen apps.
+                    guard (space["type"] as? Int) == 0 else { return nil }
+                    return ((space["id64"] ?? space["ManagedSpaceID"]) as? NSNumber)?.uint64Value
+                }
+            })
+            // One not showing, or in the top bar's own layer, isn't on any desktop: nothing to put right.
+            let stuck = numbers.filter { number in
+                let on = Set(WindowSpaces.spaceIDs(of: number))
+                return !on.isEmpty && !desktops.isSubset(of: on)
+            }
+            guard !stuck.isEmpty else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard repairing else {
+                        return dockLog.notice("Dock: \(stuck.count) windows still on only some desktops")
+                    }
+                    repair(stuck)
+                }
+            }
+        }
+    }
+
+    private static func repair(_ numbers: [CGWindowID]) {
+        dockLog.notice("Dock: \(numbers.count) windows were on only some desktops; putting them back on all of them")
+        // A window that's never been shown has no number (a negative one).
+        let windows = NSApp.windows.filter { $0.windowNumber > 0 && numbers.contains(CGWindowID($0.windowNumber)) }
+        let behaviors = windows.map(\.collectionBehavior)
+        // Off every desktop but this one for a moment, then back on all: macOS adds each to every
+        // desktop again.
+        for (window, behavior) in zip(windows, behaviors) {
+            window.collectionBehavior = behavior.subtracting(.canJoinAllSpaces).union(.moveToActiveSpace)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            MainActor.assumeIsolated {
+                for (window, behavior) in zip(windows, behaviors) { window.collectionBehavior = behavior }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    MainActor.assumeIsolated { check(repairing: false) }
+                }
+            }
+        }
+    }
+}
+
 /// The app's own list of its windows, through Accessibility. It includes minimized windows,
 /// which aren't placed on any desktop while they're in the Dock.
 enum AppWindowList {

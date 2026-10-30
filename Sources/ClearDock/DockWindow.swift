@@ -156,6 +156,7 @@ final class DockController {
                     if name == NSWorkspace.activeSpaceDidChangeNotification {
                         self?.refreshWallpaperColors()
                         self?.checkLockIn()
+                        EveryDesktop.checkSoon()
                     }
                     self?.checkFullScreen()
                     // Going full screen animates for a moment; look again once it has settled.
