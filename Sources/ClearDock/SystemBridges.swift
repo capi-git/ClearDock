@@ -162,8 +162,9 @@ enum EveryDesktop {
     }
 
     private static func check(repairing: Bool) {
-        let numbers = NSApp.windows.filter { $0.collectionBehavior.contains(.canJoinAllSpaces) && $0.windowNumber > 0 }
-            .map { CGWindowID($0.windowNumber) }
+        // Window numbers as the window server knows them (one never shown has none, a negative one).
+        let numbers = NSApp.windows.filter { $0.collectionBehavior.contains(.canJoinAllSpaces) }
+            .compactMap { CGWindowID(exactly: $0.windowNumber) }
         guard !numbers.isEmpty else { return }
         // The window server is asked off the main thread.
         DispatchQueue.global(qos: .utility).async {
@@ -193,8 +194,8 @@ enum EveryDesktop {
 
     private static func repair(_ numbers: [CGWindowID]) {
         dockLog.notice("Dock: \(numbers.count) windows were on only some desktops; putting them back on all of them")
-        // A window that's never been shown has no number (a negative one).
-        let windows = NSApp.windows.filter { $0.windowNumber > 0 && numbers.contains(CGWindowID($0.windowNumber)) }
+        let wanted = Set(numbers.map { Int($0) })
+        let windows = NSApp.windows.filter { wanted.contains($0.windowNumber) }
         let behaviors = windows.map(\.collectionBehavior)
         // Off every desktop but this one for a moment, then back on all: macOS adds each to every
         // desktop again.

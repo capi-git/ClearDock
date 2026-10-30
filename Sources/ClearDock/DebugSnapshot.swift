@@ -46,7 +46,8 @@ enum DebugSnapshot {
     static func capture(window number: Int, name: String) async {
         guard UserDefaults.standard.bool(forKey: "debug.snapshots"),
               let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
-              let window = content.windows.first(where: { $0.windowID == CGWindowID(number) }) else { return }
+              let id = CGWindowID(exactly: number),
+              let window = content.windows.first(where: { $0.windowID == id }) else { return }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let config = SCStreamConfiguration()
         config.width = Int(window.frame.width * CGFloat(filter.pointPixelScale))
