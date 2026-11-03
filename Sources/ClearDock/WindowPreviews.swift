@@ -609,7 +609,6 @@ final class WindowPreviewController {
         pointerInPanel = false
         if panel.isVisible {
             forgetSoon()
-            MemoryRelief.soon()
         }
         panel.dismiss()
         watch?.invalidate()

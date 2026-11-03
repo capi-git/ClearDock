@@ -62,7 +62,6 @@ final class BarPopover {
         panel.orderOut(nil)
         panel.setContent(nil)
         PeekShots.forgetSoon()
-        MemoryRelief.soon()
     }
 
     private func show(_ id: String, _ content: AnyView, below barBottom: CGFloat, on screen: NSScreen) {
@@ -581,7 +580,6 @@ final class LockInPicker {
         panel.orderOut(nil)
         panel.setContent(nil)
         finish(picked)
-        MemoryRelief.soon()
     }
 }
 

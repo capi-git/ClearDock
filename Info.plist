@@ -20,7 +20,12 @@
 	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
-	<key>LSUIElement</key>
+	<key>LSEnvironment</key>
+    <dict>
+        <key>MallocSpaceEfficient</key>
+        <string>1</string>
+    </dict>
+    <key>LSUIElement</key>
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Clear Dock reads the notification counts shown on app icons in the macOS Dock.</string>

@@ -157,6 +157,8 @@ final class DockController {
                         self?.refreshWallpaperColors()
                         self?.checkLockIn()
                         EveryDesktop.checkSoon()
+                    } else if self?.badgeTimer != nil {
+                        self?.refreshBadges()
                     }
                     self?.checkFullScreen()
                     // Going full screen animates for a moment; look again once it has settled.
@@ -600,11 +602,12 @@ final class DockController {
             return
         }
         refreshBadges()
-        // Reading them goes through every item in the macOS Dock, so not too often.
-        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
+        // Reading them goes through every item in the macOS Dock, waking it, so not too often.
+        // (Switching to an app, which is what usually clears its count, reads them straight away.)
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshBadges() }
         }
-        timer.tolerance = 1.5
+        timer.tolerance = 3
         RunLoop.main.add(timer, forMode: .default)
         badgeTimer = timer
     }

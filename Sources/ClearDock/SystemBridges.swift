@@ -61,23 +61,6 @@ enum BadgeReader {
 
 }
 
-/// Hands memory freed after one-off heavy work (loading icons, taking window pictures)
-/// back to the system, once that work has finished and let go of it.
-@MainActor
-enum MemoryRelief {
-    private static var scheduled = false
-
-    static func soon() {
-        guard !scheduled else { return }
-        scheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            MainActor.assumeIsolated { scheduled = false }
-            // It goes through all of the app's memory, so not on the main thread.
-            DispatchQueue.global(qos: .utility).async { _ = malloc_zone_pressure_relief(nil, 0) }
-        }
-    }
-}
-
 /// Tells real windows from "ghosts": windows an app keeps hidden in the background
 /// (TradingView keeps several). A real window is placed on one of your desktops (Spaces),
 /// even when that desktop isn't showing; a ghost isn't placed anywhere.

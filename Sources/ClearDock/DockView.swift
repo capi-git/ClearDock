@@ -115,7 +115,6 @@ final class DockView: NSView {
         let largest = Appearance.hoverEffect == .magnify ? CGFloat(Appearance.magnifyScale) : 1
         let pixels = Int((layout.iconSize * scale * largest).rounded())
         var seen = Set<String>()
-        var renderedAny = false
 
         CATransaction.begin()
         CATransaction.setAnimationDuration(Self.animationDuration)
@@ -153,7 +152,7 @@ final class DockView: NSView {
             entry.container.bounds = CGRect(origin: .zero, size: target.size)
             // The item's frame inside its own slot.
             let local = frame.offsetBy(dx: -slot(for: frame).minX, dy: -slot(for: frame).minY)
-            configure(&entry, for: item, layout: layout, frame: local, pixels: pixels, renderedAny: &renderedAny)
+            configure(&entry, for: item, layout: layout, frame: local, pixels: pixels)
             CATransaction.commit()
 
             // The icon being dragged follows the pointer instead. Only an icon whose place changed is
@@ -190,7 +189,6 @@ final class DockView: NSView {
         if isPointerInside, let window, draggedID == nil, offset == 0 {
             setHovered(model.index(at: convert(window.mouseLocationOutsideOfEventStream, from: nil)))
         }
-        if renderedAny { MemoryRelief.soon() }
     }
 
     private var magnifyingNow: Bool {
@@ -208,7 +206,7 @@ final class DockView: NSView {
     }
 
     private func configure(_ entry: inout ItemLayers, for item: DockItem, layout: DockLayout, frame: CGRect,
-                           pixels: Int, renderedAny: inout Bool) {
+                           pixels: Int) {
         let iconSize = layout.iconSize
 
         if item.kind == .separator {
@@ -240,7 +238,6 @@ final class DockView: NSView {
                 entry.icon.contents = cached
             } else {
                 entry.icon.contents = autoreleasepool { render(item, pixels: pixels, key: key, shape: iconShape) }
-                renderedAny = true
             }
             entry.iconKey = key
         }

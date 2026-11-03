@@ -264,7 +264,6 @@ final class TopBarController {
     private var running = false
     private var tokens: [(NotificationCenter, NSObjectProtocol)] = []
     private var clockTimer: Timer?
-    private var desktopTimer: DispatchSourceTimer?
     private var revealTimer: Timer?
     /// The screen whose bar has stepped aside for the macOS menu bar, while the pointer is up there.
     private var revealScreen: CGDirectDisplayID?
@@ -408,7 +407,39 @@ final class TopBarController {
             let pid = (note.object as? String).flatMap { pid_t($0) }
             MainActor.assumeIsolated { if let pid { self?.lockInForChecking(pid) } }
         }
+        // For measuring what each heavy job costs: runs the one named, keeping nothing on disk.
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.cleardock.debug.exercise"), object: nil, queue: .main) { [weak self] note in
+            let what = note.object as? String
+            MainActor.assumeIsolated { if let what { self?.exercise(what) } }
+        }
         settingsChanged()
+    }
+
+    private func exercise(_ what: String) {
+        guard UserDefaults.standard.bool(forKey: "debug.snapshots") else { return }
+        switch what {
+        case "backdrops": refreshBackdrops(after: 0)
+        case "palette": WallpaperPalette.shared.refresh(for: NSScreen.screens.first)
+        case "peek":
+            guard let screen = NSScreen.main else { return }
+            let scale = 380 / screen.frame.width * screen.backingScaleFactor
+            let desktops = model.desktops.values.joined()
+            Task { @MainActor in
+                for desktop in desktops {
+                    let shots = PeekShots(screen: screen, windows: desktop.windows)
+                    await shots.loadWallpaper(of: screen, size: CGSize(width: 380, height: 160))
+                    await shots.load(desktop.windows, scale: scale)
+                }
+                PeekShots.forgetSoon()
+            }
+        case "previews":
+            let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
+            Task { for pid in apps { _ = await WindowCapture.shots(of: pid, scale: 2) } }
+        case "dock": SettingsWindowController.shared.onChange(.dock)
+        case _ where what.hasPrefix("settings"):
+            SettingsWindowController.shared.measureOffScreen(tab: SettingsTab(rawValue: what.replacingOccurrences(of: "settings:", with: "")))
+        default: break
+        }
     }
 
     private func lockInForChecking(_ pid: pid_t) {
@@ -523,9 +554,8 @@ final class TopBarController {
             $0.refreshWallpaperColors()
             $0.checkFullScreen()
             $0.scheduleLayout(after: 0.4)
-            // Each desktop can have its own wallpaper; take the strip again once the switch (or a
-            // run of them) has settled, so macOS isn't asked for pictures mid-animation.
-            $0.refreshBackdrops(after: 1.5)
+            // Each desktop can have its own wallpaper: the strip is taken again when it's next needed.
+            $0.backdropsTaken = .distantPast
         }
         observe(workspace, NSWorkspace.didActivateApplicationNotification) {
             $0.refreshFrontApp()
@@ -539,13 +569,19 @@ final class TopBarController {
             observe(workspace, name) { $0.refreshDesktops(); $0.model.pruneIcons() }
         }
         observe(workspace, NSWorkspace.didWakeNotification) { $0.tick(); $0.refreshDesktops(); $0.layout(); $0.refreshIslands() }
+        // Nothing to keep up with while the displays sleep.
+        observe(workspace, NSWorkspace.screensDidSleepNotification) {
+            $0.exposeTimer?.cancel()
+            $0.exposeTimer = nil
+        }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.startWindowWatch() }
         observe(.default, NSApplication.didChangeScreenParametersNotification) {
             BarSettings.forgetMenuBarHidden()
             $0.scheduleScreenLayout()
             // Other apps' islands move with the screens.
             $0.refreshIslands()
         }
-        observe(.default, WallpaperPalette.didChange) { $0.applyLook(); $0.refreshBackdrops(after: 0.2) }
+        observe(.default, WallpaperPalette.didChange) { $0.applyLook(); $0.backdropsTaken = .distantPast }
         observe(.default, .NSSystemTimeZoneDidChange) { $0.tick() }
         // A right-click menu opening closes any pop-up, so the two don't overlap.
         observe(.default, NSMenu.didBeginTrackingNotification) { $0.popover.hide() }
@@ -554,26 +590,6 @@ final class TopBarController {
             BarSettings.forgetMenuBarHidden()
             $0.scheduleLayout(after: 0.5)
         }
-
-        // A safety net for changes nothing announces (a window opening, closing or moving to another
-        // desktop): only worth a full look when the set of windows has changed, not just their order.
-        let desktops = DispatchSource.makeTimerSource(queue: desktopQueue)
-        desktops.schedule(deadline: .now() + 4, repeating: 4, leeway: .seconds(2))
-        var seen: [UInt] = []
-        desktops.setEventHandler { [weak self] in
-            let numbers = OnScreenWindows.numbers(everywhere: true).sorted()
-            guard numbers != seen else { return }
-            seen = numbers
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, self.running else { return }
-                    self.refreshDesktops()
-                    self.checkCovered()
-                }
-            }
-        }
-        desktops.resume()
-        desktopTimer = desktops
 
         tick()
         refreshFrontApp()
@@ -595,8 +611,6 @@ final class TopBarController {
         battery.stop()
         clockTimer?.invalidate()
         clockTimer = nil
-        desktopTimer?.cancel()
-        desktopTimer = nil
         pendingCoverChecks.forEach { $0.cancel() }
         pendingCoverChecks.removeAll()
         revealTimer?.invalidate()
@@ -625,7 +639,6 @@ final class TopBarController {
         BarRoom.bottoms = [:]
         islands = []
         BarLookShare.publish([:])
-        MemoryRelief.soon()
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name, _ handler: @escaping @MainActor (TopBarController) -> Void) {
@@ -761,9 +774,9 @@ final class TopBarController {
         }
         inBarSpace.formIntersection(kept)
         if model.layouts != layouts {
-            // The bars moved or changed size, so the strips behind them need taking again.
+            // The bars moved or changed size, so the strips behind them need taking again when next needed.
             if model.layouts.mapValues(\.width) != layouts.mapValues(\.width) || replacesMenuBar != backdropsAtTop {
-                refreshBackdrops(after: 0.5)
+                backdropsTaken = .distantPast
             }
             model.layouts = layouts
         }
@@ -775,18 +788,36 @@ final class TopBarController {
 
     /// Watches for Mission Control or App Exposé opening. macOS doesn't announce either, but the
     /// Dock (which draws them) reports a change as they open and close: that's when it looks, at
-    /// once and as the animation settles. A look every second and a half is the safety net, and
-    /// also notices windows coming and going. The looking is done on its own queue, and only when
-    /// the windows on screen have changed (Mission Control adds its own) does it look closer.
+    /// once and as the animation settles.
     private func startExposeWatch() {
         dockWatch?.stop()
         dockWatch = DockActivityWatch { [weak self] in self?.lookForMissionControl() }
+        startWindowWatch()
+    }
+
+    /// One look every few seconds is the safety net for what nothing announces: Mission Control
+    /// opening without the Dock saying so, and windows opening, closing or moving to another
+    /// desktop. The looking is done on its own queue, and only when the windows have changed does
+    /// it look closer. It stops while the displays are asleep.
+    private func startWindowWatch() {
         exposeTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: exposeQueue)
-        timer.schedule(deadline: .now(), repeating: 1.5, leeway: .milliseconds(500))
+        timer.schedule(deadline: .now(), repeating: 3, leeway: .seconds(1))
         var seen: [UInt] = []
         var seenSet = Set<UInt>()
+        var seenEverywhere: [UInt] = []
         timer.setEventHandler { [weak self] in
+            let everywhere = OnScreenWindows.numbers(everywhere: true).sorted()
+            if everywhere != seenEverywhere {
+                seenEverywhere = everywhere
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, self.running else { return }
+                        self.refreshDesktops()
+                        self.checkCovered()
+                    }
+                }
+            }
             let numbers = OnScreenWindows.numbers()
             guard numbers != seen || numbers.isEmpty else { return }
             seen = numbers
@@ -1009,8 +1040,9 @@ final class TopBarController {
     }
 
     /// Takes a picture of the wallpaper behind each bar (leaving out every window, the macOS menu
-    /// bar and the bar itself), for filling the bar in while the pointer is at the top. Needs
-    /// Screen Recording permission; without it the bar isn't filled in.
+    /// bar and the bar itself), for filling the bar in while the pointer is at the top. Taken once
+    /// at the start and then only when the pointer gets there and it's out of date, rather than at
+    /// every change of desktop. Needs Screen Recording permission; without it the bar isn't filled in.
     private func refreshBackdrops(after delay: TimeInterval) {
         guard running, BarSettings.takesMenuBarsPlace, CGPreflightScreenCaptureAccess() else { return }
         backdropTask?.cancel()

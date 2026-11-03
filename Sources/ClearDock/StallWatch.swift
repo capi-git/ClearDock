@@ -8,8 +8,9 @@ import os
 let timingLog = Logger(subsystem: "local.cleardock", category: "timing")
 
 /// Watches for the main thread staying busy long enough to drop frames (a stall), and notes how
-/// long it lasted and what it was doing then, so a stutter can be traced to its cause. It costs
-/// nothing while Clear Dock is idle: the watcher only wakes while the main thread is working.
+/// long it lasted. With the `debug.stallStacks` setting on, it notes what it was doing then too, so
+/// a stutter can be traced to its cause: that takes a second thread waking with the main one, so
+/// it's off otherwise.
 enum StallWatch {
     /// Busy this long without a break counts as a stall: about three frames.
     private static let threshold: UInt64 = 50_000_000
@@ -45,6 +46,11 @@ enum StallWatch {
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
 
+        // Marked as already watching, the watcher is never woken.
+        guard UserDefaults.standard.bool(forKey: "debug.stallStacks") else {
+            armed.store(true, ordering: .relaxed)
+            return
+        }
         let watcher = Thread { watch() }
         watcher.name = "Clear Dock stall watch"
         // Lower priorities let macOS put off its short sleeps, so it would only look once a stall is over.
