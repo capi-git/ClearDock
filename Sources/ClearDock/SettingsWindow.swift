@@ -17,6 +17,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var store: SettingsStore?
 
+    /// For measuring what the settings window costs: makes it away from every screen, without
+    /// bringing Clear Dock forward, and closes it a few seconds later.
+    func measureOffScreen(tab: SettingsTab? = nil) {
+        let store = SettingsStore(onChange: { _ in })
+        if let tab { store.tab = tab }
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 620, height: 600),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = NSHostingController(rootView: SettingsView(store: store))
+        window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        window.orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            _ = store
+        }
+    }
+
     func show(tab: SettingsTab? = nil) {
         if window == nil {
             let store = SettingsStore(onChange: { [weak self] area in self?.onChange(area) })
@@ -58,7 +76,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         store = nil
         NSApp.setActivationPolicy(.accessory)
         onOpenChanged(false)
-        MemoryRelief.soon()
     }
 }
 
@@ -135,8 +152,24 @@ final class SettingsStore: ObservableObject {
     @Published var showPinned = false { didSet { edit(keepsTheme: true) { Settings.showPinned = showPinned } } }
     @Published var hiddenApps: [String] = [] { didSet { edit(keepsTheme: true) { Settings.hiddenApps = hiddenApps } } }
     @Published var showTrash = true { didSet { edit(keepsTheme: true) { Settings.showTrash = showTrash } } }
-    @Published var showBadges = true { didSet { edit(keepsTheme: true) { Settings.showBadges = showBadges } } }
-    @Published var showPreviews = true { didSet { edit(keepsTheme: true) { Settings.showPreviews = showPreviews } } }
+    @Published var showBadges = true {
+        didSet {
+            edit(keepsTheme: true) { Settings.showBadges = showBadges }
+            // Counts come from the macOS Dock, which only shares them with apps allowed under
+            // Privacy & Security > Accessibility.
+            if showBadges, !loading, !BadgeReader.hasPermission { BadgeReader.askForPermission() }
+        }
+    }
+    @Published var showPreviews = true {
+        didSet {
+            edit(keepsTheme: true) { Settings.showPreviews = showPreviews }
+            // Thumbnails need Privacy & Security > Screen & System Audio Recording.
+            if showPreviews, !loading, !WindowCapture.hasPermission {
+                WindowCapture.askForPermission()
+                WindowCapture.openPermissionSettings()
+            }
+        }
+    }
     @Published var scrollToOpen = true { didSet { edit(keepsTheme: true) { Settings.scrollToOpen = scrollToOpen } } }
     @Published var clickToHide = false { didSet { edit(keepsTheme: true) { Settings.clickToHide = clickToHide } } }
     @Published var hideSystemDock = true {
@@ -544,6 +577,8 @@ struct SettingsView: View {
                 .tag(SettingsTab.general)
         }
         .frame(width: 620, height: 600)
+        // Rather than switches: see `PlainSlider`.
+        .toggleStyle(.checkbox)
         // These change what's shown, so they wait until the window has finished drawing: changing
         // it while SwiftUI is in the middle of drawing it can go wrong.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -556,6 +591,75 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: BarSettings.didChange)) { _ in
             DispatchQueue.main.async { store.reloadBar() }
         }
+    }
+}
+
+/// A slider drawn from plain shapes. macOS's own sliders and switches give their glass knobs a large
+/// graphics buffer, over 130 MB for a moment whenever a window showing one opens, so the settings
+/// window uses this and checkboxes instead.
+private struct PlainSlider: View {
+    private let title: String?
+    @Binding private var value: Double
+    private let range: ClosedRange<Double>
+    private let step: Double?
+
+    private static let knob: CGFloat = 16
+
+    init(_ title: String? = nil, value: Binding<Double>, in range: ClosedRange<Double>, step: Double? = nil) {
+        self.title = title
+        _value = value
+        self.range = range
+        self.step = step
+    }
+
+    var body: some View {
+        if let title {
+            LabeledContent(title) { track.frame(width: 240) }
+        } else {
+            track
+        }
+    }
+
+    private var fraction: Double {
+        (min(max(value, range.lowerBound), range.upperBound) - range.lowerBound) / (range.upperBound - range.lowerBound)
+    }
+
+    private var track: some View {
+        GeometryReader { geometry in
+            let usable = max(geometry.size.width - Self.knob, 1)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
+                Capsule().fill(Color.accentColor).frame(width: Self.knob / 2 + usable * fraction, height: 4)
+                Circle().fill(Color.white)
+                    .overlay(Circle().strokeBorder(Color.black.opacity(0.22), lineWidth: 0.5))
+                    .frame(width: Self.knob, height: Self.knob)
+                    .offset(x: usable * fraction)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                set(fraction: (drag.location.x - Self.knob / 2) / usable)
+            })
+        }
+        .frame(height: 20)
+        .accessibilityElement()
+        .accessibilityLabel(title ?? "")
+        .accessibilityValue(String(format: "%.1f", value))
+        .accessibilityAdjustableAction { direction in
+            let change = step ?? (range.upperBound - range.lowerBound) / 20
+            set(value: value + (direction == .increment ? change : -change))
+        }
+    }
+
+    private func set(fraction: Double) {
+        set(value: range.lowerBound + min(max(fraction, 0), 1) * (range.upperBound - range.lowerBound))
+    }
+
+    private func set(value new: Double) {
+        var new = new
+        if let step { new = (new / step).rounded() * step }
+        new = min(max(new, range.lowerBound), range.upperBound)
+        if new != value { value = new }
     }
 }
 
@@ -663,17 +767,17 @@ private struct LookTab: View {
                 Picker("Shape", selection: $store.iconShape) {
                     ForEach(IconShape.allCases) { Text($0.title).tag($0) }
                 }
-                Slider(value: $store.iconSize, in: 24...96, step: 1) { Text("Size") }
-                Slider(value: $store.spacing, in: 0.3...2.5) { Text("Spacing") }
+                PlainSlider("Size", value: $store.iconSize, in: 24...96, step: 1)
+                PlainSlider("Spacing", value: $store.spacing, in: 0.3...2.5)
                 Picker("When pointed at", selection: $store.hoverEffect) {
                     ForEach(HoverEffect.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 if store.hoverEffect == .magnify {
-                    Slider(value: $store.magnifyScale, in: 1.2...2.2) { Text("Magnification") }
+                    PlainSlider("Magnification", value: $store.magnifyScale, in: 1.2...2.2)
                 }
                 Toggle("Shadows", isOn: $store.shadows)
-                Slider(value: $store.edgeGap, in: 0...40, step: 1) { Text("Distance from the edge") }
+                PlainSlider("Distance from the edge", value: $store.edgeGap, in: 0...40, step: 1)
             }
 
             Section("Background") {
@@ -753,7 +857,7 @@ private struct LookTab: View {
             }
         }
         if store.background == .color || store.background == .wallpaper {
-            Slider(value: $store.backgroundOpacity, in: 0.15...1) { Text("Strength") }
+            PlainSlider("Strength", value: $store.backgroundOpacity, in: 0.15...1)
             Picker("Finish", selection: $store.finish) {
                 ForEach(BarFinish.allCases) { Text($0.title).tag($0) }
             }
@@ -767,7 +871,7 @@ private struct LookTab: View {
             }
         }
         if store.background != .none {
-            Slider(value: $store.cornerRadius, in: 0...30) { Text("Corner rounding") }
+            PlainSlider("Corner rounding", value: $store.cornerRadius, in: 0...30)
         }
     }
 }
@@ -786,7 +890,7 @@ private struct TopBarTab: View {
                 if store.barReplacesMenuBar {
                     LabeledContent("Hold at the top for macOS menus") {
                         HStack {
-                            Slider(value: $store.menuBarDelay, in: 0.2...3, step: 0.1).frame(width: 160)
+                            PlainSlider(value: $store.menuBarDelay, in: 0.2...3, step: 0.1).frame(width: 160)
                             Text(String(format: "%.1f s", store.menuBarDelay)).monospacedDigit().foregroundStyle(.secondary)
                         }
                     }
@@ -855,7 +959,7 @@ private struct TopBarTab: View {
                     ForEach(BarFont.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Slider(value: $store.barCornerRadius, in: 0...15) { Text("Corner rounding") }
+                PlainSlider("Corner rounding", value: $store.barCornerRadius, in: 0...15)
             }
 
             Section("Song playing") {
@@ -919,7 +1023,7 @@ private struct DesktopsTab: View {
             }
 
             Section {
-                Slider(value: $store.lockInGap, in: 0...40, step: 1) { Text("Gap around the apps") }
+                PlainSlider("Gap around the apps", value: $store.lockInGap, in: 0...40, step: 1)
                 Picker("Layout", selection: $store.lockInLayout) {
                     Text("One app").tag(1)
                     Text("Two side by side").tag(2)
