@@ -1223,6 +1223,11 @@ final class TopBarController {
         if let front = NSWorkspace.shared.frontmostApplication, front.activationPolicy != .regular { return }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let screens = NSScreen.screens.compactMap { screen in screen.displayID.map { ($0, Self.topDown(screen.frame)) } }
+        // How far down each screen the bar reaches.
+        let replacesMenuBar = BarSettings.takesMenuBarsPlace
+        let barBottoms = Dictionary(NSScreen.screens.compactMap { screen in
+            screen.displayID.map { ($0, screen.frame.maxY - barFrame(on: screen, replacesMenuBar: replacesMenuBar).minY) }
+        }, uniquingKeysWith: { first, _ in first })
         // The windows on screen are looked at off the main thread: macOS can be slow to list them
         // while it's busy (opening Mission Control, say), and nothing should wait on that.
         desktopQueue.async { [weak self] in
@@ -1259,7 +1264,10 @@ final class TopBarController {
                         let share = overlap.width * overlap.height / (area.width * area.height)
                         // A game covering most of a screen, or a special window covering all of it.
                         // An ordinary window made as big as the screen still gets room made for the bar.
-                        if (game && share > 0.8) || (layer > 0 && share > 0.97) { covered.insert(id) }
+                        // So does a game's window that starts below the bar (Riot Client's fills most of
+                        // a laptop's screen): stepping aside for it would only leave an empty strip.
+                        let reachesBar = rect.minY < area.minY + (barBottoms[id] ?? 0) - 1
+                        if (game && share > 0.8 && reachesBar) || (layer > 0 && share > 0.97) { covered.insert(id) }
                     }
                 }
             }
