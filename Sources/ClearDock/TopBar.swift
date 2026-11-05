@@ -1266,7 +1266,8 @@ final class TopBarController {
                         // An ordinary window made as big as the screen still gets room made for the bar.
                         // So does a game's window that starts below the bar (Riot Client's fills most of
                         // a laptop's screen): stepping aside for it would only leave an empty strip.
-                        let reachesBar = rect.minY < area.minY + (barBottoms[id] ?? 0) - 1
+                        // A bigger bar overlapping its top few points still counts as below.
+                        let reachesBar = rect.minY < area.minY + (barBottoms[id] ?? 0) - 10
                         if (game && share > 0.8 && reachesBar) || (layer > 0 && share > 0.97) { covered.insert(id) }
                     }
                 }
