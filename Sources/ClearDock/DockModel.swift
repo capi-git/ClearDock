@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 enum DockItemKind: Equatable {
     case app
@@ -17,6 +18,8 @@ struct DockItem {
     var badge: String?
     /// Asked to quit from the dock and still shutting down.
     var isQuitting = false
+    /// The app's file isn't there right now (a development build being rebuilt, say).
+    var isFileMissing = false
 }
 
 /// Which edge of the screen the dock sits on.
@@ -326,7 +329,9 @@ final class DockModel {
     func iconKey(for item: DockItem) -> String {
         if item.kind == .trash { return isTrashFull ? "trash-full" : "trash-empty" }
         if let custom = Settings.customIcons[item.id] { return "custom:" + custom }
-        return item.url?.path ?? item.id
+        // Named apart, so the real picture is drawn once the file is back.
+        let key = item.url?.path ?? item.id
+        return item.isFileMissing ? key + "#missing" : key
     }
 
     func sourceIcon(for item: DockItem) -> NSImage? {
@@ -342,7 +347,17 @@ final class DockModel {
                 if path.hasSuffix(".app") || path.hasSuffix(".icns") { return NSWorkspace.shared.icon(forFile: path) }
                 if let picture = NSImage(contentsOfFile: path) { return picture }
             }
-            if let url = item.url { return NSWorkspace.shared.icon(forFile: url.path) }
+            if let url = item.url {
+                if FileManager.default.fileExists(atPath: url.path) { return NSWorkspace.shared.icon(forFile: url.path) }
+                // Asked about a file that's gone, macOS answers with a blank page, even through the
+                // running app. Another copy of the app has the right picture; failing that, a plain
+                // app icon at least says what it is.
+                if let copy = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: item.id)
+                    .first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+                    return NSWorkspace.shared.icon(forFile: copy.path)
+                }
+                return NSWorkspace.shared.icon(for: .applicationBundle)
+            }
             return runningApp(for: item)?.icon
         case .separator:
             return nil
@@ -576,7 +591,8 @@ final class DockModel {
             isRunning: running != nil,
             isHidden: running?.isHidden ?? false,
             badge: url.flatMap { badges[$0.standardizedFileURL.path] },
-            isQuitting: quitting.contains(key)
+            isQuitting: quitting.contains(key),
+            isFileMissing: url.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false
         )
     }
 }
