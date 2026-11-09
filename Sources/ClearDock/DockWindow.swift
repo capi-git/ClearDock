@@ -349,10 +349,13 @@ final class DockController {
             return
         }
         let settled = frame(on: screen, visible: true)
+        // Up to what you see of the dock, as the macOS Dock does: windows reach right down to it.
+        // Icons lifting or growing as the pointer passes go over them for that moment.
+        let inset = model.layout.drawnInset
         let line: CGFloat = switch edge {
-        case .bottom: settled.maxY
-        case .left: settled.maxX
-        case .right: settled.minX
+        case .bottom: settled.maxY - inset
+        case .left: settled.maxX - inset
+        case .right: settled.minX + inset
         }
         spaceKeeper.reserve(edge: edge, line: line, on: screen)
     }
@@ -376,6 +379,9 @@ final class DockController {
             panel.setFrame(target, display: false)
             view.update(animated: false)
             if autoHides && !shown { placeTriggers() }
+            // Thicker or thinner (a background coming or going with the bar's look, say): the room
+            // kept for it follows.
+            if !sameDepth { updateReservedSpace() }
             return
         }
 

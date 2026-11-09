@@ -206,7 +206,23 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
 
     // MARK: Asked from the main thread
 
-    func use(_ strips: [KeptStrip]) { perform { self.strips = strips } }
+    func use(_ strips: [KeptStrip]) {
+        perform {
+            let before = self.strips
+            self.strips = strips
+            // Strips along the same edge of the same screen that now keep less room (the dock with
+            // smaller icons, say), with where their edge was.
+            let widened = strips.compactMap { strip -> (old: CGFloat, strip: KeptStrip)? in
+                guard let old = before.first(where: { $0.edge == strip.edge && $0.screen == strip.screen })?.line else { return nil }
+                let gained = switch strip.edge {
+                case .top, .left: strip.line < old - 0.5
+                case .bottom, .right: strip.line > old + 0.5
+                }
+                return gained ? (old, strip) : nil
+            }
+            if !widened.isEmpty { self.follow(widened) }
+        }
+    }
     func watch(_ pids: [pid_t], after delay: TimeInterval = 0) {
         perform {
             let epoch = self.epoch
@@ -362,6 +378,57 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
             AXUIElementSetMessagingTimeout(app, 0.35)
             for window in Self.windows(of: app) { Self.fit(window, into: strips) }
         }
+    }
+
+    /// Less room is kept along an edge: windows that stopped at its old edge (shortened to it, or
+    /// filled up to it) follow it to the new one, rather than leaving space between them and the
+    /// dock or the bar. Windows ending anywhere else are left as they are.
+    private func follow(_ widened: [(old: CGFloat, strip: KeptStrip)]) {
+        if Self.mouseButtonDown || MissionControl.isShowing { return perform(after: 0.5) { self.follow(widened) } }
+        // Only apps with a window at one of the old edges are asked about their windows.
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var atEdge = Set<pid_t>()
+        for info in onScreen where (info[kCGWindowLayer as String] as? Int) == 0 {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, observers[pid] != nil,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { continue }
+            if widened.contains(where: { Self.side(of: frame, isAt: $0.old, facing: $0.strip) }) { atEdge.insert(pid) }
+        }
+        for pid in atEdge where !Games.isGame(pid) {
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.35)
+            for window in Self.windows(of: app) {
+                guard Self.attribute(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole,
+                      (Self.attribute(window, kAXMinimizedAttribute) as? Bool) != true,
+                      let origin = Self.point(window, kAXPositionAttribute), let size = Self.size(window, kAXSizeAttribute) else { continue }
+                let original = CGRect(origin: origin, size: size)
+                var frame = original
+                for (old, strip) in widened where Self.side(of: frame, isAt: old, facing: strip) {
+                    switch strip.edge {
+                    case .top: frame = CGRect(x: frame.minX, y: strip.line, width: frame.width, height: frame.maxY - strip.line)
+                    case .bottom: frame.size.height = strip.line - frame.minY
+                    case .left: frame = CGRect(x: strip.line, y: frame.minY, width: frame.maxX - strip.line, height: frame.height)
+                    case .right: frame.size.width = strip.line - frame.minX
+                    }
+                }
+                guard frame != original else { continue }
+                // Moved first, then grown, so it never reaches past the new edge on the way.
+                if frame.origin != original.origin { Self.setPosition(window, frame.origin) }
+                Self.setSize(window, frame.size)
+            }
+        }
+    }
+
+    /// Whether the side of a window (mostly on the strip's screen) that faces the strip is at `line`.
+    private static func side(of frame: CGRect, isAt line: CGFloat, facing strip: KeptStrip) -> Bool {
+        guard strip.screen.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return false }
+        let side: CGFloat = switch strip.edge {
+        case .top: frame.minY
+        case .bottom: frame.maxY
+        case .left: frame.minX
+        case .right: frame.maxX
+        }
+        return abs(side - line) <= 1.5
     }
 
     private func fitUnlessGame(_ window: AXUIElement) {

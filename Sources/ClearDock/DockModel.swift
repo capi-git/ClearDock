@@ -72,6 +72,9 @@ struct DockLayout {
     var separatorWidth: CGFloat { max(9, (iconSize * 0.25).rounded()) }
     /// The dock's depth, from the screen edge outwards.
     var thickness: CGFloat { farInset + iconSize + markRoom + edgeInset }
+    /// From the dock's far side to the first of it that's drawn: its background, or without one,
+    /// its icons. What's before that is room for icons to lift or grow into as the pointer passes.
+    var drawnInset: CGFloat { hasBackground ? hoverRoom + 3 : farInset }
 
     /// Position along the row.
     func along(_ point: CGPoint) -> CGFloat { edge.isVertical ? point.y : point.x }
