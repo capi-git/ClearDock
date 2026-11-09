@@ -891,10 +891,18 @@ private final class LockInSession {
         var free = DockSpaceKeeper.shared.freeArea(on: screen)
         // Always below the top bar while it's on, even while it has stepped aside for a moment: the
         // windows would grow into its place and cover it when it comes back.
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
         if let id = screen.displayID, let bottom = BarRoom.bottoms[id] {
-            let line = (NSScreen.screens.first?.frame.height ?? 0) - bottom
+            let line = mainHeight - bottom
             if free.minY < line { free = CGRect(x: free.minX, y: line, width: free.width, height: max(0, free.maxY - line)) }
         }
+        // Nor into room macOS still keeps for its own Dock, though Clear Dock has it hidden (for a
+        // while after the Dock restarts, say): apps won't let their windows into it, and one that
+        // comes up short is put in the middle of its place, leaving space above it too. Once macOS
+        // lets the room go, the screen's change refits them to the rest.
+        let visible = screen.visibleFrame
+        let allowed = free.intersection(CGRect(x: visible.minX, y: mainHeight - visible.maxY, width: visible.width, height: visible.height))
+        if !allowed.isEmpty { free = allowed }
         let area = free.insetBy(dx: gap, dy: gap)
         return area.width > 240 && area.height > 120 ? area : nil
     }
@@ -983,11 +991,13 @@ private final class LockInSession {
         }
     }
 
-    /// Where a window goes in its place: all of it, or the middle of it for one that won't grow that big.
+    /// Where a window goes in its place: all of it, or the top middle of it for one that won't grow that big.
     private func placed(_ place: CGRect, for id: CGWindowID) -> CGRect {
         guard let largest = largestSizes[id] else { return place }
         let size = CGSize(width: min(place.width, largest.width), height: min(place.height, largest.height))
-        return CGRect(x: (place.midX - size.width / 2).rounded(), y: (place.midY - size.height / 2).rounded(), width: size.width, height: size.height)
+        // In the middle across, but at the top, up against the bar like the others, rather than
+        // with space above it.
+        return CGRect(x: (place.midX - size.width / 2).rounded(), y: place.minY, width: size.width, height: size.height)
     }
 
     private func placed(_ places: [CGRect]) -> [CGRect] {
