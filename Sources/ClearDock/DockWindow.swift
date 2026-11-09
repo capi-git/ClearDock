@@ -114,7 +114,10 @@ final class DockController {
         container = DockContainerView(dock: view)
         panel.contentView = container
         applyBackground()
-        view.onEnter = { [weak self] in self?.cancelHide() }
+        view.onEnter = { [weak self] in
+            self?.cancelHide()
+            self?.model.checkOpenApps()
+        }
         view.onExit = { [weak self] in self?.scheduleHide() }
         view.onHover = { [weak self] index in self?.hoverChanged(index) }
         view.onPress = { [weak self] in self?.previews.close() }
@@ -636,8 +639,9 @@ final class DockController {
         // dock's own animations never wait on it.
         guard !readingBadges else { return }
         readingBadges = true
+        let dock = BadgeReader.dock
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let badges = BadgeReader.read()
+            let badges = BadgeReader.read(dock: dock)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }

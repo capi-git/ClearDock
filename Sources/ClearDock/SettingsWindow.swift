@@ -300,7 +300,7 @@ final class SettingsStore: ObservableObject {
     func loadDesktops() {
         let names = BarSettings.desktopNames
         let colours = BarSettings.desktopColours
-        desktopRows = DesktopReader.read().values.flatMap { $0 }.sorted { $0.number < $1.number }.map {
+        desktopRows = DesktopReader.read(regular: DesktopReader.regularApps()).values.flatMap { $0 }.sorted { $0.number < $1.number }.map {
             DesktopRow(id: $0.key, number: $0.number, name: names[$0.key] ?? "", colour: colours[$0.key])
         }
     }

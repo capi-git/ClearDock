@@ -551,7 +551,7 @@ final class LockIn {
     // MARK: Finding the windows
 
     fileprivate static func currentDesktop(on screen: NSScreen) -> Desktop? {
-        let desktops = DesktopReader.read()
+        let desktops = DesktopReader.read(regular: DesktopReader.regularApps())
         return (desktops[screen.displayUUID ?? "Main"] ?? desktops["Main"])?.first(where: \.isCurrent)
     }
 

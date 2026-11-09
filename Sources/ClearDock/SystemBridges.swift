@@ -15,18 +15,22 @@ enum BadgeReader {
         _ = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
     }
 
+    /// The macOS Dock's process number, if it's running. Asked for on the main thread, then handed
+    /// to `read`: the open apps are only ever asked about there.
+    static var dock: pid_t? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
+    }
+
     /// Notification counts keyed by app bundle path. Empty without permission. Asks the Dock
     /// through Accessibility, so it's called away from the main thread.
-    nonisolated static func read() -> [String: String] {
+    nonisolated static func read(dock: pid_t?) -> [String: String] {
         let started = CACurrentMediaTime()
         defer {
             let ms = Int((CACurrentMediaTime() - started) * 1000)
             if ms > 30 { previewLog.notice("Timing: reading badges took \(ms) ms") }
         }
-        guard AXIsProcessTrusted(),
-              let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
-        else { return [:] }
-        let dockElement = AXUIElementCreateApplication(dock.processIdentifier)
+        guard AXIsProcessTrusted(), let dock else { return [:] }
+        let dockElement = AXUIElementCreateApplication(dock)
         // Never wait long on the Dock, e.g. while it restarts.
         AXUIElementSetMessagingTimeout(dockElement, 0.25)
 

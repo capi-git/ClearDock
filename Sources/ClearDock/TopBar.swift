@@ -1195,8 +1195,9 @@ final class TopBarController {
         guard running else { return }
         guard !readingDesktops else { return desktopsAgain = true }
         readingDesktops = true
+        let regular = DesktopReader.regularApps()
         desktopQueue.async { [weak self] in
-            let desktops = DesktopReader.read()
+            let desktops = DesktopReader.read(regular: regular)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }

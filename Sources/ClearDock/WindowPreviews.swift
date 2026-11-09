@@ -145,8 +145,9 @@ enum WindowFocus {
         // and bring the window forward once it's showing. Finding its desktop asks the window
         // server about every window, so that's done off the main thread.
         let pointer = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }?.displayUUID
+        let regular = DesktopReader.regularApps()
         DispatchQueue.global(qos: .userInitiated).async {
-            let desktop = desktop(holding: windowID, onDisplay: pointer)
+            let desktop = desktop(holding: windowID, onDisplay: pointer, regular: regular)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let desktop, DesktopSwitcher.switchTo(desktop) {
@@ -170,10 +171,10 @@ enum WindowFocus {
 
     /// The ordinary desktop a window is on, when it isn't showing and is on the display under
     /// the pointer (the one the desktop shortcuts act on).
-    nonisolated private static func desktop(holding windowID: CGWindowID, onDisplay pointer: String?) -> Desktop? {
+    nonisolated private static func desktop(holding windowID: CGWindowID, onDisplay pointer: String?, regular: Set<pid_t>) -> Desktop? {
         let spaces = WindowSpaces.spaceIDs(of: windowID)
         guard spaces.count == 1 else { return nil }
-        return DesktopReader.read()
+        return DesktopReader.read(regular: regular)
             .filter { $0.key == "Main" || $0.key == pointer }
             .values.joined()
             .first { $0.id == spaces[0] && !$0.isCurrent }

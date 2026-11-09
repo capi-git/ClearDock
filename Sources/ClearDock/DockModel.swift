@@ -150,20 +150,40 @@ final class DockModel {
             NSWorkspace.didUnhideApplicationNotification,
         ]
         for name in names {
+            let opensOrQuits = name == NSWorkspace.didLaunchApplicationNotification || name == NSWorkspace.didTerminateApplicationNotification
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.reloadSoon() }
+                MainActor.assumeIsolated {
+                    if opensOrQuits { self?.watchActivationPolicies() }
+                    self?.reloadSoon()
+                }
             }
         }
         // Menu bar apps (Raycast, 1Password, Docker…) become normal apps, with a Dock icon, while
         // one of their windows is open, and nothing is announced: each open app is watched for it.
-        // Its list changes as apps open and quit, menu bar apps too.
-        appsWatch = NSWorkspace.shared.observe(\.runningApplications, options: [.initial]) { [weak self] _, _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.watchActivationPolicies() } }
+        // A menu bar app opening isn't announced either, so the open apps are looked at again
+        // whenever an app comes forward, as one does to show its window.
+        //
+        // macOS's list of open apps itself is never watched. While it is, reading that list on
+        // another thread just as an app opens or quits can bring Clear Dock down.
+        center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkOpenApps() }
         }
+        watchActivationPolicies()
     }
 
-    private var appsWatch: NSKeyValueObservation?
     private var policyWatches: [pid_t: (app: NSRunningApplication, watch: NSKeyValueObservation)] = [:]
+
+    /// Brings the watches up to date, and the dock too if the normal apps open aren't the ones in
+    /// it: a menu bar app that became one before it was watched (opened a moment ago, showing its
+    /// window). Asked when an app comes forward and when the pointer reaches the dock, so it
+    /// costs nothing while nothing happens.
+    func checkOpenApps() {
+        watchActivationPolicies()
+        let regular = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0 != NSRunningApplication.current }
+            .map(Self.key(for:))
+        if Set(regular) != Set(launchOrder) { reloadSoon() }
+    }
 
     private func watchActivationPolicies() {
         let apps = NSWorkspace.shared.runningApplications.filter { $0 != NSRunningApplication.current }

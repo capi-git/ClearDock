@@ -41,13 +41,13 @@ struct DesktopWindow: Identifiable, Equatable {
 enum DesktopReader {
     /// The desktops on each display, keyed by the display's UUID, or "Main" when all displays
     /// share the same desktops.
-    static func read() -> [String: [Desktop]] {
+    /// `regular` is `regularApps()`, asked for on the main thread before coming here.
+    static func read(regular: Set<pid_t>) -> [String: [Desktop]] {
         let displays = WindowSpaces.displaySpaces()
         guard !displays.isEmpty else { return [:] }
 
         // Which desktop each app window is on. The list runs front to back.
         let me = getpid()
-        let regular = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier))
         let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         var onDesktop: [UInt64: [DesktopWindow]] = [:]
         for info in windows {
@@ -87,6 +87,13 @@ enum DesktopReader {
             result[displayID] = desktops
         }
         return result
+    }
+
+    /// The open apps with a Dock icon, by process number. Only ever asked for on the main thread,
+    /// then handed to `read`, which mostly runs away from it: macOS's list of open apps isn't safe
+    /// to read on one thread while it changes on another (as an app opens or quits).
+    @MainActor static func regularApps() -> Set<pid_t> {
+        Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier))
     }
 
     /// Displays showing a full-screen app right now, by UUID (or "Main" when displays share desktops).
