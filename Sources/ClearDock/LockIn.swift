@@ -1119,7 +1119,7 @@ private final class LockInSession {
         // At each refresh of the screen it looks where the pointer is right then, rather than
         // where the last mouse event said: mice and screens update at different rates, and
         // going by the events makes it lag a frame now and then and catch up.
-        let overlay = DragOverlay(over: Self.flipped(area), icons: panes.map { NSRunningApplication(processIdentifier: $0.pid).flatMap(AppIcon.of) },
+        let overlay = DragOverlay(over: Self.flipped(area), on: screen?.frame, icons: panes.map { NSRunningApplication(processIdentifier: $0.pid).flatMap(AppIcon.of) },
                                   color: accent(), glow: BarSettings.lockInBorder,
                                   frostedCovers: BarSettings.lockInFrostedCovers,
                                   grip: { Self.grip(for: edge, stacked: stacked, among: $0) }) { [weak self] in
@@ -1612,7 +1612,7 @@ private final class LockInSession {
         if BarSettings.lockInBorder {
             // Softer against the calm backdrop, which already sets the windows apart.
             let colour = backdrop != nil ? accent().withAlphaComponent(0.6) : accent()
-            for (glow, frame) in zip(glows, frames) { glow.show(around: flipped(frame), color: colour) }
+            for (glow, frame) in zip(glows, frames) { glow.show(around: flipped(frame), color: colour, on: screen?.frame) }
         } else {
             glows.forEach { $0.hide() }
         }
@@ -2065,8 +2065,11 @@ final class GlowFrame {
         for strip in strips where strip.isVisible { strip.orderFrontRegardless() }
     }
 
-    /// `window` is the window's frame in the usual bottom-up screen coordinates.
-    func show(around window: NSRect, color: NSColor) {
+    /// `window` is the window's frame, and `screen` its screen's, in the usual bottom-up screen
+    /// coordinates. The glow stays on that screen: with a small gap it would reach past the edge,
+    /// and with "Displays have separate Spaces" off, macOS shows a window on every display it
+    /// touches (one mostly on another display is even moved, below that one's menu bar).
+    func show(around window: NSRect, color: NSColor, on screen: NSRect? = nil) {
         let outer = window.insetBy(dx: -Self.margin, dy: -Self.margin)
         let inset = Self.margin - Self.lineWidth / 2 - 1
         let edge = outer.insetBy(dx: inset, dy: inset)
@@ -2079,7 +2082,12 @@ final class GlowFrame {
             NSRect(x: outer.maxX - depth, y: outer.minY + depth, width: depth, height: outer.height - depth * 2),
         ]
         for (strip, frame) in zip(strips, frames) {
-            strip.show(frame, edge: edge, radius: radius, lineWidth: Self.lineWidth, color: color)
+            let kept = screen.map { frame.intersection($0) } ?? frame
+            if kept.width < 1 || kept.height < 1 {
+                strip.orderOut(nil)
+            } else {
+                strip.show(kept, edge: edge, radius: radius, lineWidth: Self.lineWidth, color: color)
+            }
         }
     }
 }
@@ -2113,6 +2121,10 @@ private final class GlowStrip: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    /// Exactly where it's put: macOS would move one reaching up into a menu bar down below it,
+    /// leaving its piece of the glow away from the window.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+
     /// Draws its own part of the whole `edge` (both in bottom-up screen coordinates).
     func show(_ frame: NSRect, edge: NSRect, radius: CGFloat, lineWidth: CGFloat, color: NSColor) {
         if let shown, shown.frame == frame, shown.edge == edge, shown.color == color {
@@ -2134,6 +2146,12 @@ private final class GlowStrip: NSPanel {
         CATransaction.commit()
         if !isVisible { orderFrontRegardless() }
     }
+}
+
+/// A panel that stays exactly where it's put: macOS would move one reaching up into a menu bar
+/// down below it.
+private final class PinnedPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 /// What you see while you drag the edge between the two windows: one see-through window over the
@@ -2164,14 +2182,17 @@ final class DragOverlay: NSObject {
     private var shown: [NSRect] = []
     private var link: CADisplayLink?
 
-    /// `area` is the lock-in space, in the usual bottom-up screen coordinates.
-    init(over area: NSRect, icons: [NSImage?], color: NSColor, glow: Bool, frostedCovers: Bool,
+    /// `area` is the lock-in space, and `screen` its screen's frame, in the usual bottom-up screen
+    /// coordinates. Like the glow, it stays on that screen.
+    init(over area: NSRect, on screen: NSRect?, icons: [NSImage?], color: NSColor, glow: Bool, frostedCovers: Bool,
          grip gripFrame: @escaping ([NSRect]) -> NSRect?, follow: @escaping () -> [NSRect]?) {
-        let frame = area.insetBy(dx: -Self.reach, dy: -Self.reach)
+        let reaching = area.insetBy(dx: -Self.reach, dy: -Self.reach)
+        let onScreen = screen.map { reaching.intersection($0) } ?? reaching
+        let frame = onScreen.isEmpty ? reaching : onScreen
         origin = frame.origin
         self.follow = follow
         self.gripFrame = gripFrame
-        panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = PinnedPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         panel.isOpaque = false
         panel.backgroundColor = .clear
