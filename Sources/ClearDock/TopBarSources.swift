@@ -286,6 +286,8 @@ final class NowPlaying {
         ("com.apple.Music.playerInfo", "com.apple.Music"),
     ]
 
+    var isRunning: Bool { !tokens.isEmpty }
+
     func start() {
         guard tokens.isEmpty else { return }
         let distributed = DistributedNotificationCenter.default()

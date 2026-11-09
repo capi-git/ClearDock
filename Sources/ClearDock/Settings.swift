@@ -4,6 +4,14 @@ import ServiceManagement
 enum Settings {
     private static var defaults: UserDefaults { .standard }
 
+    /// Posted when a dock setting changes outside the settings window (from the dock's menus), so
+    /// the window, if it's open, shows it, and doesn't save over it with what it showed before.
+    static let changedElsewhere = Notification.Name("ClearDockSettingsChangedElsewhere")
+
+    static func announceChangeElsewhere() {
+        NotificationCenter.default.post(name: changedElsewhere, object: nil)
+    }
+
     /// Which screen edge the dock sits on.
     static var position: DockEdge {
         get { defaults.string(forKey: "position").flatMap(DockEdge.init(rawValue:)) ?? .bottom }

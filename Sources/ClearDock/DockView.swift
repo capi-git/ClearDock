@@ -61,6 +61,7 @@ final class DockView: NSView {
     // Scrolling up on an icon
     private var scrollTotal: CGFloat = 0
     private var scrollHandled = false
+    private var lastWheelNotch: CFTimeInterval = 0
 
     init(model: DockModel) {
         self.model = model
@@ -650,7 +651,12 @@ final class DockView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         guard Settings.scrollToOpen, event.momentumPhase.isEmpty else { return }
-        if event.phase == .began || event.phase.isEmpty {
+        // A trackpad or Magic Mouse says when a scroll begins. A mouse wheel doesn't, and sends one
+        // event per notch: notches close together are one scroll, so they show the windows once.
+        let now = CACurrentMediaTime()
+        let wheelPaused = event.phase.isEmpty && now - lastWheelNotch > 0.6
+        if event.phase.isEmpty { lastWheelNotch = now }
+        if event.phase == .began || wheelPaused {
             scrollTotal = 0
             scrollHandled = false
         }

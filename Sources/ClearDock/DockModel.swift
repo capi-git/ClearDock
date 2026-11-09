@@ -151,6 +151,28 @@ final class DockModel {
                 MainActor.assumeIsolated { self?.reloadSoon() }
             }
         }
+        // Menu bar apps (Raycast, 1Password, Docker…) become normal apps, with a Dock icon, while
+        // one of their windows is open, and nothing is announced: each open app is watched for it.
+        // Its list changes as apps open and quit, menu bar apps too.
+        appsWatch = NSWorkspace.shared.observe(\.runningApplications, options: [.initial]) { [weak self] _, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.watchActivationPolicies() } }
+        }
+    }
+
+    private var appsWatch: NSKeyValueObservation?
+    private var policyWatches: [pid_t: (app: NSRunningApplication, watch: NSKeyValueObservation)] = [:]
+
+    private func watchActivationPolicies() {
+        let apps = NSWorkspace.shared.runningApplications.filter { $0 != NSRunningApplication.current }
+        let open = Dictionary(apps.map { ($0.processIdentifier, $0) }, uniquingKeysWith: { a, _ in a })
+        // Apps that quit are let go of (and a number used again by a new app watched afresh).
+        policyWatches = policyWatches.filter { open[$0.key] == $0.value.app }
+        for app in apps where policyWatches[app.processIdentifier] == nil {
+            let watch = app.observe(\.activationPolicy) { [weak self] _, _ in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.reloadSoon() } }
+            }
+            policyWatches[app.processIdentifier] = (app, watch)
+        }
     }
 
     private var reloadPending = false
@@ -306,9 +328,21 @@ final class DockModel {
             relayout()
         }
         if save {
-            Settings.appOrder = items.filter { $0.kind == .app }.map(\.id)
+            Settings.appOrder = Self.merging(items.filter { $0.kind == .app }.map(\.id), into: Settings.appOrder)
         }
         return to != from
+    }
+
+    /// The order just arranged, with the apps not open now kept in their places in `saved`: each
+    /// goes back after the app it followed, so it returns there when it next opens.
+    static func merging(_ shown: [String], into saved: [String]) -> [String] {
+        var result = shown
+        let showing = Set(shown)
+        for (index, key) in saved.enumerated() where !showing.contains(key) {
+            let before = saved[..<index].last { result.contains($0) }
+            result.insert(key, at: before.flatMap { result.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        }
+        return result
     }
 
     private func isInRunningGroup(_ index: Int) -> Bool {
@@ -472,6 +506,7 @@ final class DockModel {
             menu.addItem(ActionMenuItem("Hide from Dock") { [weak self] in
                 Settings.hiddenApps = Settings.hiddenApps.filter { $0 != item.id } + [item.id]
                 self?.reload()
+                Settings.announceChangeElsewhere()
             })
         }
         if let app, item.id != "com.apple.finder" {
@@ -512,6 +547,7 @@ final class DockModel {
         icons[id] = path
         Settings.customIcons = icons
         onChange?()
+        Settings.announceChangeElsewhere()
     }
 
     /// Some apps take a few seconds to shut down. Dim the icon straight away so the click feels

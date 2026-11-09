@@ -53,6 +53,13 @@ enum WindowCapture {
         recent.withLock { $0.removeAll() }
     }
 
+    /// Lets go of what's kept about one window, closed from its preview: the kept list still has
+    /// it, and its picture would bring it back into the preview.
+    static func forget(_ windowID: CGWindowID) {
+        listing.withLock { $0 = nil }
+        recent.withLock { $0[windowID] = nil }
+    }
+
     /// Thumbnails of the app's normal windows, front-most first.
     static func shots(of pid: pid_t, scale: CGFloat) async -> [WindowShot] {
         guard hasPermission, let content = await shareableContent() else { return [] }
@@ -549,6 +556,10 @@ final class WindowPreviewController {
     private var closeTimer: DispatchWorkItem?
     private var captureTask: Task<Void, Never>?
     private var shownAppID: String?
+    /// The app whose windows are being pictured right now, and the app last pointed at, whose
+    /// previews are the ones wanted: pictures of any other app arrive too late to be shown.
+    private var capturingAppID: String?
+    private var wantedAppID: String?
     private var pointerInPanel = false
 
     /// Called when the pointer leaves the preview, so the dock can decide whether to hide too.
@@ -564,8 +575,12 @@ final class WindowPreviewController {
         panel.onPick = { [weak self] windowID in self?.pick(windowID) }
         panel.onClose = { [weak self] windowID in self?.closeWindow(windowID) }
         panel.onEnter = { [weak self] in
-            self?.pointerInPanel = true
-            self?.cancelClose()
+            guard let self else { return }
+            self.pointerInPanel = true
+            self.cancelClose()
+            // On the preview, it's the app shown whose windows are wanted, even if the pointer
+            // crossed another icon on the way.
+            self.wantedAppID = self.shownAppID
         }
         panel.onExit = { [weak self] in
             self?.pointerInPanel = false
@@ -590,7 +605,12 @@ final class WindowPreviewController {
             return
         }
         cancelClose()
-        if shownAppID == item.id && panel.isVisible { return }
+        wantedAppID = item.id
+        if shownAppID == item.id && panel.isVisible {
+            // Back on the app already shown: pictures still on their way for another one would replace it.
+            if capturingAppID != item.id { captureTask?.cancel() }
+            return
+        }
         // Wait a moment before the first preview; once one is open, switching is quick.
         let delay = panel.isVisible ? 0.12 : 0.4
         let work = DispatchWorkItem { [weak self] in
@@ -605,6 +625,8 @@ final class WindowPreviewController {
         cancelClose()
         captureTask?.cancel()
         shownAppID = nil
+        capturingAppID = nil
+        wantedAppID = nil
         pid = nil
         pointerInPanel = false
         if panel.isVisible {
@@ -647,10 +669,13 @@ final class WindowPreviewController {
 
     private func open(_ appID: String, pid: pid_t, anchor: NSRect, screen: NSScreen, scale: CGFloat, edge: DockEdge) {
         captureTask?.cancel()
+        capturingAppID = appID
         let wasVisible = panel.isVisible
         captureTask = Task { @MainActor [weak self] in
             let shots = await WindowCapture.shots(of: pid, scale: scale)
-            guard let self, !Task.isCancelled else { return }
+            // Moved on to another app while its windows were being pictured.
+            guard let self, !Task.isCancelled, self.wantedAppID == appID else { return }
+            self.capturingAppID = nil
             guard !shots.isEmpty else {
                 self.close()
                 return
@@ -671,7 +696,9 @@ final class WindowPreviewController {
         // Give the app a moment to close it (or to ask about unsaved changes), then refresh.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, self.shownAppID == placement.appID else { return }
+                // Not if the pointer has moved on to another app meanwhile.
+                guard let self, self.shownAppID == placement.appID, self.wantedAppID == placement.appID else { return }
+                WindowCapture.forget(windowID)
                 self.open(placement.appID, pid: pid, anchor: placement.anchor, screen: placement.screen,
                           scale: placement.scale, edge: placement.edge)
             }

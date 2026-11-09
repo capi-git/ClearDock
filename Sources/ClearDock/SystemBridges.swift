@@ -119,6 +119,15 @@ enum WindowSpaces {
         return ((current?["id64"] ?? current?["ManagedSpaceID"]) as? NSNumber)?.uint64Value
     }
 
+    /// Every desktop and full-screen app there is, on every display, by the window server's ids.
+    static func allSpaceIDs() -> Set<UInt64> {
+        Set(displaySpaces().flatMap { display in
+            ((display["Spaces"] as? [[String: Any]]) ?? []).compactMap { space in
+                ((space["id64"] ?? space["ManagedSpaceID"]) as? NSNumber)?.uint64Value
+            }
+        })
+    }
+
     /// The desktop (or full-screen app) showing on each display right now, by the window server's ids.
     static func currentSpaceIDs() -> Set<UInt64> {
         Set(displaySpaces().compactMap { display in

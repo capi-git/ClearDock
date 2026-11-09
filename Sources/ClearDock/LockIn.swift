@@ -268,7 +268,24 @@ final class LockIn {
     func missionControl(open: Bool) {
         guard open != Self.missionControlOpen else { return }
         Self.missionControlOpen = open
+        // Desktops are removed in Mission Control, often without the desktop showing changing.
+        if !open { endRemovedDesktops() }
         for session in sessions.values { session.showDecorationsAgain() }
+    }
+
+    /// A locked-in desktop removed in Mission Control: macOS has moved its windows to another
+    /// desktop, so its lock-in ends, and what it tucked away comes back where you are. Windows
+    /// waiting for a removed desktop come back now too.
+    private func endRemovedDesktops() {
+        guard !sessions.isEmpty || !waiting.isEmpty else { return }
+        let all = WindowSpaces.allSpaceIDs()
+        // Not read (the window server busy): leave everything as it is.
+        guard !all.isEmpty else { return }
+        for session in Array(sessions.values) where !all.contains(session.space) {
+            lockInLog.notice("Lock-in: a locked-in desktop was removed; unlocking it")
+            end(session, now: true)
+        }
+        for space in Array(waiting.keys) where !all.contains(space) { restoreWaiting(on: space) }
     }
 
     /// A bar setting changed. Only a different gap moves the windows; the glow setting only
@@ -369,6 +386,7 @@ final class LockIn {
     }
 
     private func spaceChanged() {
+        endRemovedDesktops()
         let current = WindowSpaces.currentSpaceIDs()
         for space in waiting.keys where current.contains(space) { restoreWaiting(on: space) }
         for session in sessions.values {
@@ -688,6 +706,17 @@ private final class LockInSession {
     private var largestSizes: [CGWindowID: CGSize] = [:]
     /// Where each window was found the last time it needed fitting.
     private var lastFound: [CGWindowID: CGRect] = [:]
+    /// How the windows share this desktop: the left one's share of the width, and with three, the
+    /// stack's share of the width and its top one's of the height. Each locked-in desktop has its
+    /// own, starting from the last you set.
+    private var splitShare: Double
+    private var columnShare: Double
+    private var rowShare: Double
+    /// Windows of other apps on the desktop not dealt with yet, and since when, so one that never
+    /// can be (a dialog, say, or one of an app that won't list its windows) is left alone after a
+    /// while, rather than looked for over and over.
+    private var undealtSince: [CGWindowID: Date] = [:]
+    private var leftAlone = Set<CGWindowID>()
 
     nonisolated private static let windowNotifications = [kAXWindowMovedNotification, kAXWindowResizedNotification, kAXUIElementDestroyedNotification,
                                               kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
@@ -696,6 +725,9 @@ private final class LockInSession {
         self.space = space
         self.display = display
         self.panes = panes
+        splitShare = BarSettings.lockInSplit
+        columnShare = BarSettings.lockInStackColumn
+        rowShare = BarSettings.lockInStackRows
         movers = panes.map { WindowMover($0.element) }
         glows = panes.map { _ in GlowFrame() }
         divider.onBegin = { [weak self] offset in self?.grabbed(.upright, at: offset) }
@@ -872,11 +904,11 @@ private final class LockInSession {
         guard let area else { return [] }
         let gap = CGFloat(BarSettings.lockInGap)
         if stacked {
-            return Self.stack(in: area, gap: gap, column: ((area.width - gap) * CGFloat(BarSettings.lockInStackColumn)).rounded(),
-                              top: ((area.height - gap) * CGFloat(BarSettings.lockInStackRows)).rounded())
+            return Self.stack(in: area, gap: gap, column: ((area.width - gap) * CGFloat(columnShare)).rounded(),
+                              top: ((area.height - gap) * CGFloat(rowShare)).rounded())
         }
         if panes.count == 1 { return [area] }
-        let left = ((area.width - gap) * CGFloat(BarSettings.lockInSplit)).rounded()
+        let left = ((area.width - gap) * CGFloat(splitShare)).rounded()
         return [
             CGRect(x: area.minX, y: area.minY, width: left, height: area.height),
             CGRect(x: area.minX + left + gap, y: area.minY, width: area.width - left - gap, height: area.height),
@@ -992,18 +1024,35 @@ private final class LockInSession {
             if left.width > goals[0].width + 16 { minimumWidths[panes[0].id] = left.width }
             if right.width > goals[1].width + 16 { minimumWidths[panes[1].id] = right.width }
             if abs(left.minX - goals[0].minX) < 3 && abs(left.maxX - goals[0].maxX) > 16 && abs(left.width - goals[0].width) > 16 {
-                BarSettings.lockInSplit = Self.clampSplit((left.maxX - area.minX) / usable)
+                setSplit(Self.clampSplit((left.maxX - area.minX) / usable))
             } else if abs(right.maxX - goals[1].maxX) < 3 && abs(right.minX - goals[1].minX) > 16 && abs(right.width - goals[1].width) > 16 {
-                BarSettings.lockInSplit = Self.clampSplit((right.minX - gap - area.minX) / usable)
+                setSplit(Self.clampSplit((right.minX - gap - area.minX) / usable))
             } else if abs(right.minX - goals[1].minX) < 3 && right.width > goals[1].width + 16 {
-                // The right one would reach off the screen: give it the room it needs.
-                BarSettings.lockInSplit = Self.clampSplit((area.width - gap - right.width) / usable)
+                // The right one would reach off the screen: give it the room it needs, here only.
+                splitShare = Self.clampSplit((area.width - gap - right.width) / usable)
             }
         }
         fit(found)
     }
 
     private static func clampSplit(_ value: CGFloat) -> Double { Double(min(0.8, max(0.2, value))) }
+
+    /// You set how they share the screen here: kept for this desktop, and remembered for the next
+    /// one you lock in. (Other locked-in desktops keep theirs.)
+    private func setSplit(_ share: Double) {
+        splitShare = share
+        BarSettings.lockInSplit = share
+    }
+
+    private func setColumn(_ share: CGFloat) {
+        columnShare = Double(min(0.7, max(0.1, share)))
+        BarSettings.lockInStackColumn = columnShare
+    }
+
+    private func setRows(_ share: CGFloat) {
+        rowShare = Double(min(0.9, max(0.1, share)))
+        BarSettings.lockInStackRows = rowShare
+    }
 
     private func swap(_ a: Int, _ b: Int) {
         panes.swapAt(a, b)
@@ -1023,8 +1072,8 @@ private final class LockInSession {
         func kept(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 3 }
         // Moved well clear, rather than an app rounding its size (like Terminal, to whole lines).
         func moved(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) > 16 }
-        func column(_ share: CGFloat) { BarSettings.lockInStackColumn = Double(min(0.7, max(0.1, share))) }
-        func rows(_ share: CGFloat) { BarSettings.lockInStackRows = Double(min(0.9, max(0.1, share))) }
+        func column(_ share: CGFloat) { setColumn(share) }
+        func rows(_ share: CGFloat) { setRows(share) }
         if kept(big.maxX, goals[2].maxX), moved(big.minX, goals[2].minX) {
             column((big.minX - gap - area.minX) / width)
         } else if kept(top.minX, goals[0].minX), moved(top.maxX, goals[0].maxX) {
@@ -1074,12 +1123,14 @@ private final class LockInSession {
                                   color: accent(), glow: BarSettings.lockInBorder,
                                   frostedCovers: BarSettings.lockInFrostedCovers,
                                   grip: { Self.grip(for: edge, stacked: stacked, among: $0) }) { [weak self] in
-            guard let self, self.dividerMoved else { return nil }
-            // Let go without the edge hearing of it (Mission Control opening mid-drag, say).
+            guard let self, self.holding else { return nil }
+            // Let go without the edge hearing of it (Mission Control opening mid-drag, say), even
+            // before it moved: otherwise the covers would stay up, and this keep running.
             if NSEvent.pressedMouseButtons & 1 == 0 {
                 DispatchQueue.main.async { MainActor.assumeIsolated { self.dividerReleased() } }
                 return nil
             }
+            guard self.dividerMoved else { return nil }
             return self.framesWhileDragging()?.map(Self.flipped)
         }
         overlay.move(frames.map(Self.flipped))
@@ -1103,8 +1154,8 @@ private final class LockInSession {
         guard !ended, stacked, let area else { return nil }
         let gap = CGFloat(BarSettings.lockInGap)
         let width = area.width - gap, height = area.height - gap
-        var column = draggedWidth ?? (width * CGFloat(BarSettings.lockInStackColumn)).rounded()
-        var top = draggedHeight ?? (height * CGFloat(BarSettings.lockInStackRows)).rounded()
+        var column = draggedWidth ?? (width * CGFloat(columnShare)).rounded()
+        var top = draggedHeight ?? (height * CGFloat(rowShare)).rounded()
         if let x {
             column = min(max((x + DividerPanel.overlap - area.minX).rounded(), max(160, width * 0.12)), width * 0.7)
             draggedWidth = column
@@ -1169,10 +1220,10 @@ private final class LockInSession {
         }
         let gap = CGFloat(BarSettings.lockInGap)
         if stacked {
-            if let width = draggedWidth { BarSettings.lockInStackColumn = Double(min(0.7, max(0.1, width / (area.width - gap)))) }
-            if let height = draggedHeight { BarSettings.lockInStackRows = Double(min(0.9, max(0.1, height / (area.height - gap)))) }
+            if let width = draggedWidth { setColumn(width / (area.width - gap)) }
+            if let height = draggedHeight { setRows(height / (area.height - gap)) }
         } else if let width = draggedWidth {
-            BarSettings.lockInSplit = Self.clampSplit(width / (area.width - gap))
+            setSplit(Self.clampSplit(width / (area.width - gap)))
         }
         draggedWidth = nil
         draggedHeight = nil
@@ -1252,14 +1303,27 @@ private final class LockInSession {
     private func sortNewcomers(_ seen: [(pid: pid_t, id: CGWindowID)], numbers: [UInt], mainHeight: CGFloat) {
         guard !ended else { return arriving = false }
         var found: [pid_t: Set<CGWindowID>] = [:]
+        let now = Date()
+        var undealt: [CGWindowID: Date] = [:]
         for (pid, id) in seen {
             guard !keptApps.contains(pid), !Games.isGame(pid), !BarSettings.lockInAllows(pid),
                   checkingApp.map({ NSRunningApplication(processIdentifier: pid)?.executableURL == $0 }) ?? true else { continue }
             // You brought this one back after lock-in put it away: you want it here.
             if putAway.contains(id) { keptWindows.insert(id) }
-            guard !keptWindows.contains(id) else { continue }
+            guard !keptWindows.contains(id), !leftAlone.contains(id) else { continue }
+            // Still here after several looks: one lock-in can't move or tuck away. It stays, and
+            // the looking can settle down again.
+            let since = undealtSince[id] ?? now
+            if now.timeIntervalSince(since) > 8 {
+                lockInLog.notice("Lock-in: leaving a window it can't put away where it is")
+                leftAlone.insert(id)
+                continue
+            }
+            undealt[id] = since
             found[pid, default: []].insert(id)
         }
+        // Gone since (put away, closed or moved off): forgotten, so the list only holds what's here.
+        undealtSince = undealt
         // Only a look that found nothing to do counts as done: a window found but not dealt with yet
         // (its app still opening) is looked for again next time.
         guard !found.isEmpty else {

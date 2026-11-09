@@ -489,6 +489,13 @@ final class TopBarController {
         applyMenuBarSetting()
         guard BarSettings.enabled else { return stop() }
         start()
+        // Only with the song in the bar: finding out what's playing asks Spotify or Music (and
+        // macOS asks you to allow that), and fetches each song's cover.
+        let wantsSong = BarSettings.items.contains { $0.kind == .song && $0.isOn }
+        if wantsSong != nowPlaying.isRunning {
+            if wantsSong { nowPlaying.start() } else { nowPlaying.stop() }
+            nowPlaying.onChange()
+        }
         let items = BarSettings.items, names = BarSettings.desktopNames, colours = BarSettings.desktopColours
         if model.items != items { model.items = items }
         if model.desktopNames != names { model.desktopNames = names }
@@ -547,10 +554,8 @@ final class TopBarController {
     private func start() {
         guard !running else { return }
         running = true
-        nowPlaying.start()
         volume.start()
         battery.start()
-        if model.track != nowPlaying.track { model.track = nowPlaying.track }
 
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {

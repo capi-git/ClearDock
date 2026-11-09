@@ -4,8 +4,13 @@ import AppKit
 /// line in the dock, like the macOS Dock's own menu. The rest are in the settings window.
 @MainActor
 enum SettingsMenu {
-    static func add(to menu: NSMenu, changed: @escaping @MainActor () -> Void) {
+    static func add(to menu: NSMenu, changed dockChanged: @escaping @MainActor () -> Void) {
         menu.autoenablesItems = false
+        // The settings window, if it's open, shows the change too.
+        let changed: @MainActor () -> Void = {
+            dockChanged()
+            Settings.announceChangeElsewhere()
+        }
 
         menu.addItem(ActionMenuItem(Settings.autoHide ? "Turn Hiding Off" : "Turn Hiding On") {
             Settings.autoHide.toggle()

@@ -591,6 +591,10 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: BarSettings.didChange)) { _ in
             DispatchQueue.main.async { store.reloadBar() }
         }
+        // And the dock's menus change the dock's.
+        .onReceive(NotificationCenter.default.publisher(for: Settings.changedElsewhere)) { _ in
+            DispatchQueue.main.async { store.reload() }
+        }
     }
 }
 
