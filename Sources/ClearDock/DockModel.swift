@@ -165,8 +165,13 @@ final class DockModel {
     private func watchActivationPolicies() {
         let apps = NSWorkspace.shared.runningApplications.filter { $0 != NSRunningApplication.current }
         let open = Dictionary(apps.map { ($0.processIdentifier, $0) }, uniquingKeysWith: { a, _ in a })
-        // Apps that quit are let go of (and a number used again by a new app watched afresh).
-        policyWatches = policyWatches.filter { open[$0.key] == $0.value.app }
+        // Apps that quit are let go of (and a number used again by a new app watched afresh). Each
+        // watch stops first, while its app is still held: an app freed while still watched brings
+        // Clear Dock down a moment later.
+        for (pid, entry) in policyWatches where open[pid] != entry.app {
+            entry.watch.invalidate()
+            policyWatches[pid] = nil
+        }
         for app in apps where policyWatches[app.processIdentifier] == nil {
             let watch = app.observe(\.activationPolicy) { [weak self] _, _ in
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.reloadSoon() } }
