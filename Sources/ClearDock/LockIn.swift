@@ -553,7 +553,7 @@ final class LockIn {
             }
             let app = NSRunningApplication(processIdentifier: window.app)
             choices.append(Choice(id: window.id, pid: window.app, element: element, frame: window.frame,
-                                  app: app?.localizedName ?? "App", icon: app?.icon,
+                                  app: app?.localizedName ?? "App", icon: app.flatMap(AppIcon.of),
                                   title: attribute(element, kAXTitleAttribute) as? String, leftAlone: leftAlone))
         }
         // Titles are only needed to tell apart windows of the same app.
@@ -1070,7 +1070,7 @@ private final class LockInSession {
         // At each refresh of the screen it looks where the pointer is right then, rather than
         // where the last mouse event said: mice and screens update at different rates, and
         // going by the events makes it lag a frame now and then and catch up.
-        let overlay = DragOverlay(over: Self.flipped(area), icons: panes.map { NSRunningApplication(processIdentifier: $0.pid)?.icon },
+        let overlay = DragOverlay(over: Self.flipped(area), icons: panes.map { NSRunningApplication(processIdentifier: $0.pid).flatMap(AppIcon.of) },
                                   color: accent(), glow: BarSettings.lockInBorder,
                                   frostedCovers: BarSettings.lockInFrostedCovers,
                                   grip: { Self.grip(for: edge, stacked: stacked, among: $0) }) { [weak self] in
@@ -1417,13 +1417,13 @@ private final class LockInSession {
         let keep: () -> Void = { [weak self] in self?.keepHere(sent, apps: hidden) }
         if let app = apps.first {
             onNotice(apps.count == 1 ? "\(app.localizedName ?? "That app") will open on your next desktop"
-                                     : "\(apps.count) apps will open on your next desktop", app.icon, keep)
+                                     : "\(apps.count) apps will open on your next desktop", AppIcon.of(app), keep)
         } else if let app = moved.first {
             onNotice(moved.count == 1 ? "Moved \(app.localizedName ?? "that app") to your other screen"
-                                      : "Moved \(moved.count) apps to your other screen", app.icon, nil)
+                                      : "Moved \(moved.count) apps to your other screen", AppIcon.of(app), nil)
         } else if let app = hidden.first {
             onNotice(hidden.count == 1 ? "Hid \(app.localizedName ?? "that app") until you unlock"
-                                       : "Hid \(hidden.count) apps until you unlock", app.icon, keep)
+                                       : "Hid \(hidden.count) apps until you unlock", AppIcon.of(app), keep)
         }
     }
 

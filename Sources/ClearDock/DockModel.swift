@@ -347,18 +347,8 @@ final class DockModel {
                 if path.hasSuffix(".app") || path.hasSuffix(".icns") { return NSWorkspace.shared.icon(forFile: path) }
                 if let picture = NSImage(contentsOfFile: path) { return picture }
             }
-            if let url = item.url {
-                if FileManager.default.fileExists(atPath: url.path) { return NSWorkspace.shared.icon(forFile: url.path) }
-                // Asked about a file that's gone, macOS answers with a blank page, even through the
-                // running app. Another copy of the app has the right picture; failing that, a plain
-                // app icon at least says what it is.
-                if let copy = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: item.id)
-                    .first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-                    return NSWorkspace.shared.icon(forFile: copy.path)
-                }
-                return NSWorkspace.shared.icon(for: .applicationBundle)
-            }
-            return runningApp(for: item)?.icon
+            if let url = item.url { return AppIcon.ofApp(at: url, id: item.id) }
+            return runningApp(for: item).flatMap(AppIcon.of)
         case .separator:
             return nil
         }
@@ -397,8 +387,13 @@ final class DockModel {
         NSApp.activate()
         switch item.kind {
         case .app:
-            guard let url = item.url else { return }
-            if let running = runningApp(for: item) { NSApp.yieldActivation(to: running) }
+            let running = runningApp(for: item)
+            if let running { NSApp.yieldActivation(to: running) }
+            guard let url = item.url, FileManager.default.fileExists(atPath: url.path) else {
+                // With its file gone it can't be opened, but while it's open it can still come forward.
+                running?.activate(from: .current)
+                return
+            }
             let config = NSWorkspace.OpenConfiguration()
             config.activates = true
             NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
@@ -463,7 +458,7 @@ final class DockModel {
         } else {
             menu.addItem(ActionMenuItem("Open") { [weak self] in if let i = now() { self?.activate(i) } })
         }
-        if let url = item.url {
+        if let url = item.url, FileManager.default.fileExists(atPath: url.path) {
             menu.addItem(ActionMenuItem("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             })
@@ -594,6 +589,28 @@ final class DockModel {
             isQuitting: quitting.contains(key),
             isFileMissing: url.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false
         )
+    }
+}
+
+/// An app's picture, for anywhere one is shown. Asked about a file that's gone (a development build
+/// whose folder was deleted, say), macOS answers with a blank page, even through the running app.
+enum AppIcon {
+    static func of(_ app: NSRunningApplication) -> NSImage? {
+        if let url = app.bundleURL, !FileManager.default.fileExists(atPath: url.path) {
+            return ofApp(at: url, id: app.bundleIdentifier)
+        }
+        return app.icon
+    }
+
+    static func ofApp(at url: URL, id: String?) -> NSImage {
+        if FileManager.default.fileExists(atPath: url.path) { return NSWorkspace.shared.icon(forFile: url.path) }
+        // Another copy of the app has the right picture; failing that, a plain app icon at least
+        // says what it is.
+        if let id, let copy = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: id)
+            .first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+            return NSWorkspace.shared.icon(forFile: copy.path)
+        }
+        return NSWorkspace.shared.icon(for: .applicationBundle)
     }
 }
 

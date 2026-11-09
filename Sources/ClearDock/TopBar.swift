@@ -186,7 +186,7 @@ final class TopBarModel {
 
     func icon(for pid: pid_t) -> NSImage? {
         if let icon = icons[pid] { return icon }
-        let icon = NSRunningApplication(processIdentifier: pid)?.icon
+        let icon = NSRunningApplication(processIdentifier: pid).flatMap(AppIcon.of)
         icons[pid] = icon
         return icon
     }

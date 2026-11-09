@@ -258,7 +258,7 @@ final class SettingsStore: ObservableObject {
 
     static func appIcon(_ bundle: String) -> NSImage? {
         if let icon = icons[bundle] { return icon }
-        let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle).map { NSWorkspace.shared.icon(forFile: $0.path) }
+        let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle).map { AppIcon.ofApp(at: $0, id: bundle) }
         icons[bundle] = icon
         return icon
     }
