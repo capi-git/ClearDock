@@ -162,6 +162,10 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
     /// Windows that moved or changed size while a mouse button was down, looked at once it's up.
     private var dragged: [CFHashCode: AXUIElement] = [:]
     private var dragCheckPending = false
+    /// Edges that have moved since windows were last brought up to them, with where each was then,
+    /// and whether a look at them is waiting for a mouse button to come up.
+    private var movedEdges: [(edge: KeptStrip.Edge, screen: CGRect, old: CGFloat)] = []
+    private var followWaiting = false
     /// The latest fit asked for each window; an earlier one still waiting is dropped.
     private var pending: [CFHashCode: Int] = [:]
     private var asked = 0
@@ -210,17 +214,17 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
         perform {
             let before = self.strips
             self.strips = strips
-            // Strips along the same edge of the same screen that now keep less room (the dock with
-            // smaller icons, say), with where their edge was.
-            let widened = strips.compactMap { strip -> (old: CGFloat, strip: KeptStrip)? in
-                guard let old = before.first(where: { $0.edge == strip.edge && $0.screen == strip.screen })?.line else { return nil }
-                let gained = switch strip.edge {
-                case .top, .left: strip.line < old - 0.5
-                case .bottom, .right: strip.line > old + 0.5
-                }
-                return gained ? (old, strip) : nil
+            // Strips along the same edge of the same screen whose edge moved (the dock with smaller
+            // icons, say), with where it was. Only where it was at first is kept until they've been
+            // looked at: nothing moves windows while that waits (a mouse button is down), so that's
+            // where the windows that stopped at it still are.
+            for strip in strips {
+                guard let old = before.first(where: { $0.edge == strip.edge && $0.screen == strip.screen })?.line,
+                      abs(old - strip.line) > 0.5,
+                      !self.movedEdges.contains(where: { $0.edge == strip.edge && $0.screen == strip.screen }) else { continue }
+                self.movedEdges.append((strip.edge, strip.screen, old))
             }
-            if !widened.isEmpty { self.follow(widened) }
+            self.followMovedEdges()
         }
     }
     func watch(_ pids: [pid_t], after delay: TimeInterval = 0) {
@@ -242,6 +246,7 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
             self.watchedWindows.removeAll()
             self.dragged.removeAll()
             self.pending.removeAll()
+            self.movedEdges.removeAll()
         }
     }
 
@@ -383,8 +388,32 @@ private final class WindowWatcher: Thread, @unchecked Sendable {
     /// Less room is kept along an edge: windows that stopped at its old edge (shortened to it, or
     /// filled up to it) follow it to the new one, rather than leaving space between them and the
     /// dock or the bar. Windows ending anywhere else are left as they are.
-    private func follow(_ widened: [(old: CGFloat, strip: KeptStrip)]) {
-        if Self.mouseButtonDown || MissionControl.isShowing { return perform(after: 0.5) { self.follow(widened) } }
+    private func followMovedEdges() {
+        guard !movedEdges.isEmpty else { return }
+        // Never under a window you're dragging or resizing, nor while Mission Control shows them
+        // shrunk: once that's over, and once, however many times the edges moved meanwhile.
+        if Self.mouseButtonDown || MissionControl.isShowing {
+            guard !followWaiting else { return }
+            followWaiting = true
+            let epoch = epoch
+            return perform(after: 0.5) {
+                self.followWaiting = false
+                if self.epoch == epoch { self.followMovedEdges() }
+            }
+        }
+        let moved = movedEdges
+        movedEdges.removeAll()
+        // Those keeping less room now than they did at first, as they are now.
+        let strips = strips
+        let widened = moved.compactMap { edge -> (old: CGFloat, strip: KeptStrip)? in
+            guard let strip = strips.first(where: { $0.edge == edge.edge && $0.screen == edge.screen }) else { return nil }
+            let gained = switch strip.edge {
+            case .top, .left: strip.line < edge.old - 0.5
+            case .bottom, .right: strip.line > edge.old + 0.5
+            }
+            return gained ? (edge.old, strip) : nil
+        }
+        guard !widened.isEmpty else { return }
         // Only apps with a window at one of the old edges are asked about their windows.
         let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         var atEdge = Set<pid_t>()

@@ -276,17 +276,33 @@ final class LockIn {
     /// A locked-in desktop removed in Mission Control: macOS has moved its windows to another
     /// desktop, so its lock-in ends, and what it tucked away comes back where you are. Windows
     /// waiting for a removed desktop come back now too.
-    private func endRemovedDesktops() {
+    private func endRemovedDesktops(lookedTwice: Bool = false) {
         guard !sessions.isEmpty || !waiting.isEmpty else { return }
         let all = WindowSpaces.allSpaceIDs()
         // Not read (the window server busy): leave everything as it is.
         guard !all.isEmpty else { return }
-        for session in Array(sessions.values) where !all.contains(session.space) {
+        // Only on a display that's still there: one unplugged is seen to by `screensChanged`,
+        // which waits a moment in case it's only reconnecting.
+        let gone = sessions.values.filter { !all.contains($0.space) && $0.screen != nil }
+        let goneWaiting = waiting.keys.filter { !all.contains($0) }
+        guard !gone.isEmpty || !goneWaiting.isEmpty else { return }
+        guard lookedTwice else {
+            // Still missing in a moment? A display dropping out for a second takes its desktops
+            // off the list, and brings them back.
+            removedCheck?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated { self?.endRemovedDesktops(lookedTwice: true) }
+            }
+            removedCheck = work
+            return DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+        }
+        for session in gone {
             lockInLog.notice("Lock-in: a locked-in desktop was removed; unlocking it")
             end(session, now: true)
         }
-        for space in Array(waiting.keys) where !all.contains(space) { restoreWaiting(on: space) }
+        for space in goneWaiting { restoreWaiting(on: space) }
     }
+    private var removedCheck: DispatchWorkItem?
 
     /// A bar setting changed. Only a different gap moves the windows; the glow setting only
     /// redraws round them, and anything else (the clock, a desktop's name) changes neither.
@@ -712,10 +728,10 @@ private final class LockInSession {
     private var splitShare: Double
     private var columnShare: Double
     private var rowShare: Double
-    /// Windows of other apps on the desktop not dealt with yet, and since when, so one that never
-    /// can be (a dialog, say, or one of an app that won't list its windows) is left alone after a
-    /// while, rather than looked for over and over.
-    private var undealtSince: [CGWindowID: Date] = [:]
+    /// Windows of other apps on the desktop not dealt with yet, since when, and how many times it's
+    /// been tried, so one that never can be (a dialog, say, or one of an app that won't list its
+    /// windows) is left alone after a while, rather than looked for over and over.
+    private var undealtSince: [CGWindowID: (since: Date, tries: Int)] = [:]
     private var leftAlone = Set<CGWindowID>()
 
     nonisolated private static let windowNotifications = [kAXWindowMovedNotification, kAXWindowResizedNotification, kAXUIElementDestroyedNotification,
@@ -1314,22 +1330,24 @@ private final class LockInSession {
         guard !ended else { return arriving = false }
         var found: [pid_t: Set<CGWindowID>] = [:]
         let now = Date()
-        var undealt: [CGWindowID: Date] = [:]
+        var undealt: [CGWindowID: (since: Date, tries: Int)] = [:]
         for (pid, id) in seen {
             guard !keptApps.contains(pid), !Games.isGame(pid), !BarSettings.lockInAllows(pid),
                   checkingApp.map({ NSRunningApplication(processIdentifier: pid)?.executableURL == $0 }) ?? true else { continue }
             // You brought this one back after lock-in put it away: you want it here.
             if putAway.contains(id) { keptWindows.insert(id) }
             guard !keptWindows.contains(id), !leftAlone.contains(id) else { continue }
-            // Still here after several looks: one lock-in can't move or tuck away. It stays, and
-            // the looking can settle down again.
-            let since = undealtSince[id] ?? now
-            if now.timeIntervalSince(since) > 8 {
+            // Still here after several tries, over a while: one lock-in can't move or tuck away.
+            // It stays, and the looking can settle down again. (Tries as well as time: none are
+            // made while you're on another desktop, however long that is.)
+            let since = undealtSince[id]?.since ?? now
+            let tries = (undealtSince[id]?.tries ?? 0) + 1
+            if tries > 3, now.timeIntervalSince(since) > 8 {
                 lockInLog.notice("Lock-in: leaving a window it can't put away where it is")
                 leftAlone.insert(id)
                 continue
             }
-            undealt[id] = since
+            undealt[id] = (since, tries)
             found[pid, default: []].insert(id)
         }
         // Gone since (put away, closed or moved off): forgotten, so the list only holds what's here.

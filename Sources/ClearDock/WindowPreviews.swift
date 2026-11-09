@@ -581,6 +581,7 @@ final class WindowPreviewController {
             // On the preview, it's the app shown whose windows are wanted, even if the pointer
             // crossed another icon on the way.
             self.wantedAppID = self.shownAppID
+            self.refreshIfOwed()
         }
         panel.onExit = { [weak self] in
             self?.pointerInPanel = false
@@ -609,6 +610,7 @@ final class WindowPreviewController {
         if shownAppID == item.id && panel.isVisible {
             // Back on the app already shown: pictures still on their way for another one would replace it.
             if capturingAppID != item.id { captureTask?.cancel() }
+            refreshIfOwed()
             return
         }
         // Wait a moment before the first preview; once one is open, switching is quick.
@@ -627,6 +629,7 @@ final class WindowPreviewController {
         shownAppID = nil
         capturingAppID = nil
         wantedAppID = nil
+        refreshOwed = false
         pid = nil
         pointerInPanel = false
         if panel.isVisible {
@@ -673,9 +676,12 @@ final class WindowPreviewController {
         let wasVisible = panel.isVisible
         captureTask = Task { @MainActor [weak self] in
             let shots = await WindowCapture.shots(of: pid, scale: scale)
-            // Moved on to another app while its windows were being pictured.
-            guard let self, !Task.isCancelled, self.wantedAppID == appID else { return }
+            // The latest asked for (an earlier one is cancelled): nothing is on its way any more.
+            guard let self, !Task.isCancelled else { return }
             self.capturingAppID = nil
+            // Moved on to another app while its windows were being pictured.
+            guard self.wantedAppID == appID else { return }
+            self.refreshOwed = false
             guard !shots.isEmpty else {
                 self.close()
                 return
@@ -696,13 +702,28 @@ final class WindowPreviewController {
         // Give the app a moment to close it (or to ask about unsaved changes), then refresh.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             MainActor.assumeIsolated {
-                // Not if the pointer has moved on to another app meanwhile.
-                guard let self, self.shownAppID == placement.appID, self.wantedAppID == placement.appID else { return }
+                guard let self, self.shownAppID == placement.appID else { return }
                 WindowCapture.forget(windowID)
+                // Owed until the new pictures are shown. Now, unless the pointer has moved on to
+                // another app meanwhile: then when it's back on this one, if this preview is still up.
+                self.refreshOwed = true
+                guard self.wantedAppID == placement.appID else { return }
                 self.open(placement.appID, pid: pid, anchor: placement.anchor, screen: placement.screen,
                           scale: placement.scale, edge: placement.edge)
             }
         }
+    }
+
+    /// The preview shown is out of date (a window was closed from it), until new pictures are shown.
+    private var refreshOwed = false
+
+    /// Takes the shown app's pictures again if that's owed and they aren't already on their way:
+    /// the pointer was on another icon when they were due, or when they came.
+    private func refreshIfOwed() {
+        guard refreshOwed, let pid, let placement = lastPlacement, shownAppID == placement.appID,
+              wantedAppID == placement.appID, capturingAppID != placement.appID else { return }
+        open(placement.appID, pid: pid, anchor: placement.anchor, screen: placement.screen,
+             scale: placement.scale, edge: placement.edge)
     }
 
     private func pick(_ windowID: CGWindowID) {

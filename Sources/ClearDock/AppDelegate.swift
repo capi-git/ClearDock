@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before anything is hidden: see `CrashGuard.takeOver`.
+        CrashGuard.takeOver()
         StallWatch.start()
         // Every call into another app through Accessibility gives up after half a second, rather
         // than the system's six, so an app that's busy or stuck can't freeze Clear Dock with it.
@@ -104,15 +106,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Clear Dock sees to the Dock and menu bar itself from here.
-        CrashGuard.standDown()
         // Windows lock-in puts back are still on their way (out of the Dock, say) for a moment;
         // restarting the macOS Dock below would stop them where they are.
         if topBar?.prepareForQuit() == true { Thread.sleep(forTimeInterval: 0.7) }
         // Across a restart, keep the macOS Dock hidden only if Clear Dock will reopen at login.
-        if poweringOff && LoginItem.isEnabled { return }
+        // The guard stays, in case the restart is called off after Clear Dock has gone.
+        if poweringOff && LoginItem.isEnabled { return CrashGuard.leaveForRestart() }
         SystemDock.restore()
         SystemMenuBar.restore()
+        // Only now: stopped part-way through the above (force quit, say), the guard finishes it.
+        CrashGuard.standDown()
     }
 
     // MARK: Menu bar item

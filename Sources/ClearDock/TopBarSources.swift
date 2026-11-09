@@ -341,8 +341,9 @@ final class NowPlaying {
                 """
             Self.run(script) { [weak self] text in
                 let lines = (text ?? "").components(separatedBy: "\n")
-                // Don't override a change the player announced in the meantime.
-                guard let self, self.track == nil, lines.count >= 2 else { return }
+                // Don't override a change the player announced in the meantime. Nor after being
+                // stopped (the song taken out of the bar while the player was being asked).
+                guard let self, self.isRunning, self.track == nil, lines.count >= 2 else { return }
                 let state = lines[0] == "playing" ? "Playing" : lines[0] == "paused" ? "Paused" : "Stopped"
                 let track = Track(title: lines[1], artist: lines.count > 2 ? lines[2] : "", album: lines.count > 3 ? lines[3] : "",
                                   isPlaying: state == "Playing", player: player)
