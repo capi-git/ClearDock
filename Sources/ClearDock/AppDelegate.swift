@@ -15,7 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
         DebugSnapshot.start()
         Settings.seedFromSystemDock()
-        if Settings.hideSystemDock { SystemDock.hide() }
+        // With hiding turned off, put back anything left hidden when Clear Dock last stopped.
+        if Settings.hideSystemDock { SystemDock.hide() } else { SystemDock.restore(waiting: false) }
         controller = DockController()
         topBar = TopBarController()
         SettingsWindowController.shared.onChange = { [weak self] area in
@@ -29,12 +30,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         askForPermissionsOnce()
         previewLog.notice("Clear Dock started; accessibility: \(AXIsProcessTrusted()); screen recording: \(CGPreflightScreenCaptureAccess())")
         setUpStatusItem()
-
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.poweringOff = true }
-        }
 
         // Quit cleanly (and bring the macOS Dock back) if asked to stop from outside.
         signal(SIGTERM, SIG_IGN)
@@ -98,7 +93,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return main
     }
 
+    /// Notes whether this quit is part of shutting down, restarting or logging out. macOS says so in
+    /// the request to quit itself, so a shutdown that another app called off earlier (to save a
+    /// document, say) doesn't count when you quit Clear Dock later.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let reason = NSAppleEventManager.shared().currentAppleEvent?.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+        let poweringOffReasons = [kAEShutDown, kAERestart, kAELogOut, kAEReallyLogOut].map { OSType($0) }
+        poweringOff = reason.map { poweringOffReasons.contains($0.typeCodeValue) || poweringOffReasons.contains($0.enumCodeValue) } ?? false
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        // Clear Dock sees to the Dock and menu bar itself from here.
+        CrashGuard.standDown()
         // Windows lock-in puts back are still on their way (out of the Dock, say) for a moment;
         // restarting the macOS Dock below would stop them where they are.
         if topBar?.prepareForQuit() == true { Thread.sleep(forTimeInterval: 0.7) }

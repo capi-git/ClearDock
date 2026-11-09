@@ -380,8 +380,11 @@ enum BarSettings {
             return true
         }
         // In case macOS keeps the setting somewhere else: a screen without a notch that keeps no
-        // room for the menu bar along its top means the menu bar is hiding itself.
-        return NSScreen.screens.contains { $0.safeAreaInsets.top == 0 && $0.frame.maxY - $0.visibleFrame.maxY < 1 }
+        // room for the menu bar along its top means the menu bar is hiding itself. Only screens
+        // that have a menu bar count: with "Displays have separate Spaces" off, that's the main one
+        // alone, and the others never keep room for it.
+        let withMenuBar = NSScreen.screensHaveSeparateSpaces ? NSScreen.screens : Array(NSScreen.screens.prefix(1))
+        return withMenuBar.contains { $0.safeAreaInsets.top == 0 && $0.frame.maxY - $0.visibleFrame.maxY < 1 }
     }
 
     /// Opens the System Settings page with "Automatically hide and show the menu bar".
@@ -416,6 +419,7 @@ enum SystemMenuBar {
     static func hide(then done: @escaping @MainActor (Bool) -> Void = { _ in }) {
         guard !hiding else { return }
         hiding = true
+        CrashGuard.start()
         let saved = UserDefaults.standard.object(forKey: savedKey) as? Bool
         DispatchQueue.global(qos: .userInitiated).async {
             var before = saved

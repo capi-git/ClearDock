@@ -51,13 +51,18 @@ enum SystemDock {
     /// happens on `queue`, one step after another, so turning it off and on again quickly can't
     /// note the wrong settings (ones Clear Dock had changed) as the Dock's own.
     static func hide() {
+        CrashGuard.start()
         queue.async {
-            // Record each setting's value before changing it, once. A setting already changed
-            // but not recorded (from an older Clear Dock) can only have been unset before.
+            // Record each setting's value before changing it, once, even when it already matches
+            // (plenty of people hide their Dock or keep it on the left themselves).
             let defaults = UserDefaults.standard
             var saved = defaults.dictionary(forKey: savedKey) ?? [:]
+            // The exception: an older Clear Dock changed the settings without recording them. Its
+            // icon size of 1 and 1000-second delay are values nobody picks, so with both in place
+            // and nothing recorded, the matching settings were its own and were unset before.
+            let leftover = saved.isEmpty && overrides.filter { $0.key == "tilesize" || $0.key == "autohide-delay" }.allSatisfy(isApplied)
             for o in overrides where saved[o.key] == nil {
-                saved[o.key] = isApplied(o) ? notSet : (value(o.key) ?? notSet)
+                saved[o.key] = leftover && isApplied(o) ? notSet : (value(o.key) ?? notSet)
             }
             defaults.set(saved, forKey: savedKey)
 
@@ -85,13 +90,17 @@ enum SystemDock {
             if let text = saved[o.key] as? String, text != notSet {
                 run("/usr/bin/defaults", ["write", "com.apple.dock", o.key, o.type, text])
             } else if let v = saved[o.key] as? NSNumber {
-                let text: String
-                switch o.type {
-                case "-bool": text = v.boolValue ? "true" : "false"
-                case "-int": text = String(v.intValue)
-                default: text = String(v.doubleValue)
+                let type: String, text: String
+                if o.type == "-bool" {
+                    (type, text) = (o.type, v.boolValue ? "true" : "false")
+                } else if o.type == "-int", v.doubleValue == v.doubleValue.rounded() {
+                    (type, text) = (o.type, String(v.intValue))
+                } else {
+                    // The Dock's size is often a fraction (System Settings' slider stores 47.5, say):
+                    // put it back as it was, not rounded down.
+                    (type, text) = ("-float", String(v.doubleValue))
                 }
-                run("/usr/bin/defaults", ["write", "com.apple.dock", o.key, o.type, text])
+                run("/usr/bin/defaults", ["write", "com.apple.dock", o.key, type, text])
             } else {
                 run("/usr/bin/defaults", ["delete", "com.apple.dock", o.key])
             }

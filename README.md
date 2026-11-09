@@ -58,7 +58,7 @@ Clear Dock has no accounts or analytics. Its only network request downloads the 
 
 ## Good to know
 
-- **It changes your macOS Dock settings while it runs.** Clear Dock hides the macOS Dock by changing the Dock's settings and restarting it. Quitting Clear Dock puts the original settings back. You can turn this off with "Hide the macOS Dock" in Settings.
+- **It changes your macOS Dock settings while it runs.** Clear Dock hides the macOS Dock by changing the Dock's settings and restarting it. Quitting Clear Dock puts the original settings back. If it ever crashes or is force quit, a small helper (a second "ClearDock" in Activity Monitor, about 2 MB) puts them back instead. You can turn this off with "Hide the macOS Dock" in Settings.
 - **It uses private macOS interfaces.** Clear Dock relies on some of these for desktops and windows, so a macOS update could break parts of it.
 
 ## License

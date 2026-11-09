@@ -510,14 +510,19 @@ final class TopBarController {
             // Only once: other settings changes shouldn't ask System Events again.
             guard !SystemMenuBar.isHiddenByClearDock else { return }
             SystemMenuBar.hide { [weak self] hidden in
-                if hidden { self?.menuBarChanged() }
+                guard hidden else { return }
+                self?.menuBarChanged()
+                // Turned off meanwhile (while macOS asked for permission, say): put it back.
+                self?.applyMenuBarSetting()
             }
         } else {
             guard SystemMenuBar.isHiddenByClearDock else { return }
-            SystemMenuBar.restore { [weak self] _ in
+            SystemMenuBar.restore { [weak self] restored in
                 self?.menuBarChanged()
-                // Turned back on meanwhile: hide it again.
-                self?.applyMenuBarSetting()
+                // Turned back on meanwhile: hide it again. Only after it worked: one that failed
+                // (macOS refusing, say) would only fail again, straight away, over and over. The
+                // next settings change tries again.
+                if restored { self?.applyMenuBarSetting() }
             }
         }
     }
