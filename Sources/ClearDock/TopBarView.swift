@@ -101,6 +101,9 @@ private struct BarItemView: View {
         case .song: if let track = model.track { SongPill(model: model, track: track) }
         case .volume: VolumePill(model: model)
         case .battery: if let percent = model.battery { BatteryPill(model: model, percent: percent) }
+        case .processor: if let load = model.processorLoad { ProcessorPill(model: model, load: load) }
+        case .temperature: if let degrees = model.temperature { TemperaturePill(model: model, degrees: degrees) }
+        case .disk: if let free = model.diskFree { DiskPill(model: model, free: free) }
         case .clock: ClockPill(model: model)
         }
     }
@@ -489,6 +492,84 @@ private struct BatteryPill: View {
             Button("Hide Battery") { model.hide(.battery) }
             BarSettingsButton()
         }
+    }
+}
+
+/// How busy the processor is, across all its cores.
+private struct ProcessorPill: View {
+    let model: TopBarModel
+    let load: Int
+    @Environment(\.barLook) private var look
+
+    var body: some View {
+        Pill(look: look, action: Self.openActivityMonitor) {
+            BarSymbol(name: "cpu", look: look)
+            // Room for two digits always, so the rest of the bar keeps still as the number changes.
+            // Never cut short, as a crowded bar cuts long text: half a number would be a wrong one.
+            ZStack(alignment: .trailing) {
+                Text("00%").hidden()
+                Text("\(load)%")
+            }
+            .monospacedDigit()
+            .fixedSize()
+        }
+        .contextMenu {
+            Button("Open Activity Monitor") { Self.openActivityMonitor() }
+            Divider()
+            Button("Hide Processor Load") { model.hide(.processor) }
+            BarSettingsButton()
+        }
+    }
+
+    static func openActivityMonitor() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
+    }
+}
+
+/// The hottest spot on the Mac's chip.
+private struct TemperaturePill: View {
+    let model: TopBarModel
+    let degrees: Int
+    @Environment(\.barLook) private var look
+
+    var body: some View {
+        let symbol = degrees >= 80 ? "thermometer.high" : degrees >= 55 ? "thermometer.medium" : "thermometer.low"
+        // About as hot as the chip lets itself get before it slows down.
+        let hot = degrees >= 95
+        Pill(look: look, action: ProcessorPill.openActivityMonitor) {
+            BarSymbol(name: symbol, look: look, color: hot ? NSColor.systemRed : nil)
+            Text("\(degrees)°C").monospacedDigit().fixedSize()
+        }
+        .contextMenu {
+            Button("Open Activity Monitor") { ProcessorPill.openActivityMonitor() }
+            Divider()
+            Button("Hide Temperature") { model.hide(.temperature) }
+            BarSettingsButton()
+        }
+    }
+}
+
+/// The room left on the start-up disk.
+private struct DiskPill: View {
+    let model: TopBarModel
+    let free: String
+    @Environment(\.barLook) private var look
+
+    var body: some View {
+        Pill(look: look, action: Self.openStorageSettings) {
+            BarSymbol(name: "internaldrive", look: look)
+            Text(free).monospacedDigit().fixedSize()
+        }
+        .contextMenu {
+            Button("Storage Settings…") { Self.openStorageSettings() }
+            Divider()
+            Button("Hide Free Disk Space") { model.hide(.disk) }
+            BarSettingsButton()
+        }
+    }
+
+    private static func openStorageSettings() {
+        SystemSettings.open("com.apple.settings.Storage")
     }
 }
 

@@ -2,7 +2,7 @@ import AppKit
 
 /// One thing the top bar can show.
 enum BarItemKind: String, CaseIterable, Identifiable {
-    case desktops, app, lockIn, song, volume, battery, clock
+    case desktops, app, lockIn, song, volume, battery, processor, temperature, disk, clock
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -12,6 +12,9 @@ enum BarItemKind: String, CaseIterable, Identifiable {
         case .song: "Song playing"
         case .volume: "Volume"
         case .battery: "Battery"
+        case .processor: "Processor load"
+        case .temperature: "Temperature"
+        case .disk: "Free disk space"
         case .clock: "Date and time"
         }
     }
@@ -23,6 +26,9 @@ enum BarItemKind: String, CaseIterable, Identifiable {
         case .song: "music.note"
         case .volume: "speaker.wave.2.fill"
         case .battery: "battery.75percent"
+        case .processor: "cpu"
+        case .temperature: "thermometer.medium"
+        case .disk: "internaldrive"
         case .clock: "clock"
         }
     }
@@ -148,10 +154,16 @@ enum BarSettings {
         BarItem(kind: .song, side: .right, isOn: true),
         BarItem(kind: .volume, side: .right, isOn: true),
         BarItem(kind: .battery, side: .right, isOn: true),
+        // The Mac's readings are off until they're switched on: a laptop's bar hasn't the room for
+        // them beside everything else, and reading them is work done every two seconds.
+        BarItem(kind: .processor, side: .right, isOn: false),
+        BarItem(kind: .temperature, side: .right, isOn: false),
+        BarItem(kind: .disk, side: .right, isOn: false),
         BarItem(kind: .clock, side: .right, isOn: true),
     ]
 
-    /// The items in order, each saved as "kind:side:on". Items added in later versions are put at the end.
+    /// The items in order, each saved as "kind:side:on". Items added in later versions go where they
+    /// are in the usual order: after the item that comes before them there.
     static var items: [BarItem] {
         get {
             let saved = (defaults.stringArray(forKey: "bar.items") ?? []).compactMap { entry -> BarItem? in
@@ -160,8 +172,12 @@ enum BarSettings {
                       let side = BarSide(rawValue: parts[1]) else { return nil }
                 return BarItem(kind: kind, side: side, isOn: parts[2] == "1")
             }
-            let missing = defaultItems.filter { item in !saved.contains { $0.kind == item.kind } }
-            return saved + missing
+            var items = saved
+            for (place, item) in defaultItems.enumerated() where !items.contains(where: { $0.kind == item.kind }) {
+                let before = place > 0 ? items.firstIndex { $0.kind == defaultItems[place - 1].kind } : nil
+                items.insert(item, at: before.map { $0 + 1 } ?? 0)
+            }
+            return items
         }
         set { defaults.set(newValue.map { "\($0.kind.rawValue):\($0.side.rawValue):\($0.isOn ? 1 : 0)" }, forKey: "bar.items") }
     }

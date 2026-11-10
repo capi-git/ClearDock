@@ -17,6 +17,7 @@ It's built to stay light. In testing it used about 18 MB of memory at start and 
 **Top bar**
 
 - Shows your desktops, the app in front, lock-in mode, the song playing, volume, battery, and the date and time
+- Can also show how busy the processor is, how hot it runs and how much room your disk has left
 - Lets you turn each item on or off and place it on the left or right
 - Takes on the colour of the desktop you're on
 - Can replace the macOS menu bar, with the macOS menus still there when you hold the pointer at the top
@@ -59,7 +60,7 @@ Clear Dock has no accounts or analytics. Its only network request downloads the 
 ## Good to know
 
 - **It changes your macOS Dock settings while it runs.** Clear Dock hides the macOS Dock by changing the Dock's settings and restarting it. Quitting Clear Dock puts the original settings back. If it ever crashes or is force quit, a small helper (a second "ClearDock" in Activity Monitor, about 3 MB) puts them back instead. You can turn this off with "Hide the macOS Dock" in Settings.
-- **It uses private macOS interfaces.** Clear Dock relies on some of these for desktops and windows, so a macOS update could break parts of it.
+- **It uses private macOS interfaces.** Clear Dock relies on some of these for desktops, windows and the processor's temperature, so a macOS update could break parts of it.
 
 ## License
 

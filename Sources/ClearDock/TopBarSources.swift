@@ -701,3 +701,124 @@ final class BatteryStatus {
         return (nil, false, false)
     }
 }
+
+// MARK: - The Mac itself
+
+/// How busy the processor is, how hot it runs and how much room the start-up disk has left.
+/// Nothing announces these, so they're read every two seconds, on a queue of their own, and only
+/// the ones asked for: with none, nothing runs.
+@MainActor
+final class MacReadings {
+    /// The items in the bar that show a reading.
+    static let kinds: Set<BarItemKind> = [.processor, .temperature, .disk]
+
+    /// Percent of the processor's time spent working since the look before, across all its cores.
+    private(set) var load: Int?
+    /// The hottest spot on the chip, in °C.
+    private(set) var temperature: Int?
+    /// Bytes free on the start-up disk.
+    private(set) var diskFree: Int64?
+    var onChange: () -> Void = {}
+
+    /// Which of them are being read now.
+    private(set) var reading: Set<BarItemKind> = []
+    private var timer: DispatchSourceTimer?
+
+    private static let queue = DispatchQueue(label: "ClearDock.Readings", qos: .utility)
+
+    /// Reads these from now on (any of `kinds`) and no others; with none, nothing runs. What was
+    /// last read stays known until the next look, so a bar coming back isn't empty meanwhile.
+    func read(_ kinds: Set<BarItemKind>) {
+        guard kinds != reading else { return }
+        reading = kinds
+        timer?.cancel()
+        timer = nil
+        guard !kinds.isEmpty else { return }
+        let timer = DispatchSource.makeTimerSource(queue: Self.queue)
+        // The first look comes after half a second: how busy the processor is shows only between two looks.
+        timer.schedule(deadline: .now() + 0.5, repeating: 2, leeway: .milliseconds(500))
+        var ticks = kinds.contains(.processor) ? ProcessorLoad.ticks() : nil
+        let sensors = kinds.contains(.temperature) ? ChipSensors() : nil
+        timer.setEventHandler { [weak self] in
+            var load: Int?
+            if kinds.contains(.processor) {
+                let now = ProcessorLoad.ticks()
+                if let before = ticks, let now { load = ProcessorLoad.percent(from: before, to: now).map { Int($0.rounded()) } }
+                ticks = now
+            }
+            let temperature = sensors?.hottest().map { Int($0.rounded()) }
+            let diskFree = kinds.contains(.disk) ? StartupDisk.free() : nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // Not once other things are read, or nothing is.
+                    guard let self, self.reading == kinds else { return }
+                    guard self.load != load || self.temperature != temperature || self.diskFree != diskFree else { return }
+                    self.load = load
+                    self.temperature = temperature
+                    self.diskFree = diskFree
+                    self.onChange()
+                }
+            }
+        }
+        timer.resume()
+        self.timer = timer
+    }
+}
+
+/// How busy the processor is. The system counts the time each core has spent working and idle
+/// since the Mac started; the share spent working between two looks is the load.
+enum ProcessorLoad {
+    /// Each core's working and idle time so far, in the system's ticks.
+    typealias Ticks = [(busy: UInt32, idle: UInt32)]
+
+    static func ticks() -> Ticks? {
+        var cores: natural_t = 0
+        var info: processor_info_array_t?
+        var length: mach_msg_type_number_t = 0
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
+        guard host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &cores, &info, &length) == KERN_SUCCESS, let info else { return nil }
+        // The system hands over the list; it's given back once read.
+        defer { vm_deallocate(mach_task_self_, vm_address_t(bitPattern: info), vm_size_t(length) * vm_size_t(MemoryLayout<integer_t>.stride)) }
+        let states = Int(CPU_STATE_MAX)
+        guard Int(length) >= Int(cores) * states else { return nil }
+        return (0..<Int(cores)).map { core in
+            let time = { (state: Int32) in UInt32(bitPattern: info[core * states + Int(state)]) }
+            // "Nice" is low-priority work.
+            return (time(CPU_STATE_USER) &+ time(CPU_STATE_SYSTEM) &+ time(CPU_STATE_NICE), time(CPU_STATE_IDLE))
+        }
+    }
+
+    /// Percent of all the cores' time spent working between two looks. Nil when they can't be compared.
+    static func percent(from before: Ticks, to after: Ticks) -> Double? {
+        guard before.count == after.count else { return nil }
+        var busy: UInt64 = 0, all: UInt64 = 0
+        for (old, new) in zip(before, after) {
+            // The counters start again from zero after a long time: the difference allows for that.
+            let worked = UInt64(new.busy &- old.busy), idled = UInt64(new.idle &- old.idle)
+            busy += worked
+            all += worked + idled
+        }
+        return all > 0 ? Double(busy) * 100 / Double(all) : nil
+    }
+}
+
+enum StartupDisk {
+    /// Bytes free on the start-up disk right now. macOS could clear more when it's needed (old
+    /// snapshots, files also kept in iCloud), which Finder counts as available too; that isn't
+    /// counted here, as asking for it takes thousands of times longer.
+    static func free() -> Int64? {
+        var info = statfs()
+        guard statfs("/", &info) == 0 else { return nil }
+        return Int64(info.f_bavail) * Int64(info.f_bsize)
+    }
+
+    /// "1.48 TB", "412 GB", "8.6 GB": counted in thousands, as Finder counts disk space.
+    static func label(_ bytes: Int64) -> String {
+        let gigabytes = Double(bytes) / 1e9
+        if gigabytes >= 999.5 { return String(format: "%.2f TB", gigabytes / 1000) }
+        if gigabytes >= 9.95 { return String(format: "%.0f GB", gigabytes) }
+        if gigabytes >= 0.9995 { return String(format: "%.1f GB", gigabytes) }
+        return String(format: "%.0f MB", gigabytes * 1000)
+    }
+}

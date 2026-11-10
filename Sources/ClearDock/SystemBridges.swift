@@ -443,3 +443,75 @@ enum CoreDock {
         sendNotification?(notification as CFString, 0)
     }
 }
+
+/// The temperature sensors on the Mac's chip. macOS has no public way to read them; this asks the
+/// system's sensor service through its private calls, as temperature tools do, which needs no
+/// permission. Not for two threads at once: the readings' own queue is all that uses it.
+final class ChipSensors {
+    private typealias Create = @convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?
+    private typealias SetMatching = @convention(c) (CFTypeRef, CFDictionary) -> Void
+    private typealias CopyServices = @convention(c) (CFTypeRef) -> Unmanaged<CFArray>?
+    private typealias CopyProperty = @convention(c) (CFTypeRef, CFString) -> Unmanaged<CFTypeRef>?
+    private typealias CopyEvent = @convention(c) (CFTypeRef, Int64, Int32, Int64) -> Unmanaged<CFTypeRef>?
+    private typealias FloatValue = @convention(c) (CFTypeRef, Int32) -> Double
+
+    private static func symbol<T>(_ name: String, _ type: T.Type) -> T? {
+        dlsym(UnsafeMutableRawPointer(bitPattern: -2), name).map { unsafeBitCast($0, to: type) }
+    }
+    private static let create = symbol("IOHIDEventSystemClientCreate", Create.self)
+    private static let setMatching = symbol("IOHIDEventSystemClientSetMatching", SetMatching.self)
+    private static let copyServices = symbol("IOHIDEventSystemClientCopyServices", CopyServices.self)
+    private static let copyProperty = symbol("IOHIDServiceClientCopyProperty", CopyProperty.self)
+    private static let copyEvent = symbol("IOHIDServiceClientCopyEvent", CopyEvent.self)
+    private static let floatValue = symbol("IOHIDEventGetFloatValue", FloatValue.self)
+
+    /// The kind of sensor event that carries a temperature, and the field of it that holds the degrees.
+    private static let temperatureEvent: Int64 = 15
+    private static let temperatureField: Int32 = 15 << 16
+
+    /// The connection to the sensor service, and the chip's sensors found through it. Kept between
+    /// looks: finding the sensors costs several times what reading them does.
+    private var client: CFTypeRef?
+    private var sensors: [CFTypeRef] = []
+    /// Looks to sit out before searching again, after a search that found no sensor.
+    private var waits = 0
+
+    /// The hottest spot on the chip, in °C. Nil when macOS gives no reading that can be real (on a
+    /// macOS that names or serves the sensors differently, say), rather than a wrong one.
+    func hottest() -> Double? {
+        if sensors.isEmpty {
+            guard waits == 0 else {
+                waits -= 1
+                return nil
+            }
+            find()
+            // About a minute, at a look every two seconds.
+            if sensors.isEmpty { waits = 30 }
+        }
+        guard let copyEvent = Self.copyEvent, let floatValue = Self.floatValue else { return nil }
+        var hottest: Double?
+        for sensor in sensors {
+            guard let event = copyEvent(sensor, Self.temperatureEvent, 0, 0)?.takeRetainedValue() else { continue }
+            let degrees = floatValue(event, Self.temperatureField)
+            // A sensor that's switched off says -9200: only what can be a real temperature counts.
+            if (1..<130).contains(degrees) { hottest = max(hottest ?? degrees, degrees) }
+        }
+        // None of them answered: find them afresh next time.
+        if hottest == nil {
+            client = nil
+            sensors = []
+        }
+        return hottest
+    }
+
+    private func find() {
+        guard let create = Self.create, let setMatching = Self.setMatching, let copyServices = Self.copyServices,
+              let copyProperty = Self.copyProperty, let client = create(kCFAllocatorDefault)?.takeRetainedValue() else { return }
+        // Sensors are found by what they are: Apple's own page of the catalogue (0xff00), item 5 (temperature).
+        setMatching(client, ["PrimaryUsagePage": 0xff00, "PrimaryUsage": 5] as CFDictionary)
+        let all = copyServices(client)?.takeRetainedValue() as? [CFTypeRef] ?? []
+        // The ones on the chip itself are named "PMU tdie1", "PMU tdie2" and so on (Apple chips).
+        sensors = all.filter { (copyProperty($0, "Product" as CFString)?.takeRetainedValue() as? String)?.contains("tdie") == true }
+        self.client = sensors.isEmpty ? nil : client
+    }
+}

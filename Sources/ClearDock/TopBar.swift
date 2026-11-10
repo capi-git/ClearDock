@@ -121,6 +121,11 @@ final class TopBarModel {
     var battery: Int?
     var charging = false
     var pluggedIn = false
+    /// The Mac's readings: percent of the processor in use, the chip's hottest spot in °C, and the
+    /// room left on the start-up disk as it's shown. Each is nil while it isn't known.
+    var processorLoad: Int?
+    var temperature: Int?
+    var diskFree: String?
     var now = Date()
     var desktopColours: [String: DesktopColour] = [:]
     var artwork: NSImage?
@@ -261,6 +266,8 @@ final class TopBarController {
     private let nowPlaying = NowPlaying()
     private let volume = SystemVolume()
     private let battery = BatteryStatus()
+    private let readings = MacReadings()
+    private var displaysAsleep = false
     private var running = false
     private var tokens: [(NotificationCenter, NSObjectProtocol)] = []
     private var clockTimer: Timer?
@@ -331,6 +338,14 @@ final class TopBarController {
             if self.model.battery != self.battery.percent { self.model.battery = self.battery.percent }
             if self.model.charging != self.battery.charging { self.model.charging = self.battery.charging }
             if self.model.pluggedIn != self.battery.pluggedIn { self.model.pluggedIn = self.battery.pluggedIn }
+        }
+        readings.onChange = { [weak self] in
+            guard let self else { return }
+            if self.model.processorLoad != self.readings.load { self.model.processorLoad = self.readings.load }
+            if self.model.temperature != self.readings.temperature { self.model.temperature = self.readings.temperature }
+            // The room left changes all the time, but rarely by enough to show.
+            let free = self.readings.diskFree.map(StartupDisk.label)
+            if self.model.diskFree != free { self.model.diskFree = free }
         }
         model.toggleMute = { [weak self] in self?.volume.toggleMute() }
         model.changeVolume = { [weak self] change in
@@ -556,6 +571,7 @@ final class TopBarController {
         running = true
         volume.start()
         battery.start()
+        displaysAsleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
 
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {
@@ -583,8 +599,14 @@ final class TopBarController {
         observe(workspace, NSWorkspace.screensDidSleepNotification) {
             $0.exposeTimer?.cancel()
             $0.exposeTimer = nil
+            $0.displaysAsleep = true
+            $0.followReadings()
         }
-        observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.startWindowWatch() }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) {
+            $0.startWindowWatch()
+            $0.displaysAsleep = false
+            $0.followReadings()
+        }
         observe(.default, NSApplication.didChangeScreenParametersNotification) {
             BarSettings.forgetMenuBarHidden()
             $0.scheduleScreenLayout()
@@ -619,6 +641,7 @@ final class TopBarController {
         nowPlaying.stop()
         volume.stop()
         battery.stop()
+        readings.read([])
         clockTimer?.invalidate()
         clockTimer = nil
         pendingCoverChecks.forEach { $0.cancel() }
@@ -731,6 +754,7 @@ final class TopBarController {
                         self.leaving.remove(id)
                         panel.orderOut(nil)
                         self.inBarSpace.remove(id)
+                        self.followReadings()
                     }
                 }
                 continue
@@ -794,6 +818,17 @@ final class TopBarController {
         if model.thinScreens != thin { model.thinScreens = thin }
         BarRoom.bottoms = room
         DockSpaceKeeper.shared.reserveTop(reserved)
+        followReadings()
+    }
+
+    /// The Mac's readings are taken only while one of them is in a bar that's up: not while every
+    /// bar is put away (for a full-screen app or a game) or is a thin line, nor while the displays sleep.
+    private func followReadings() {
+        let seen = running && !displaysAsleep && panels.contains { id, entry in
+            entry.panel.isVisible && !model.thinScreens.contains(String(id))
+        }
+        let shown = model.items.filter { $0.isOn && MacReadings.kinds.contains($0.kind) }.map(\.kind)
+        readings.read(seen ? Set(shown) : [])
     }
 
     /// Watches for Mission Control or App Exposé opening. macOS doesn't announce either, but the
