@@ -13,6 +13,7 @@ It's built to stay light. In testing it used about 18 MB of memory at start and 
 - Offers no background, glass, a colour or your wallpaper behind the icons
 - Shows window previews when you point at an app, and an app's windows when you scroll up on its icon
 - Includes notification badges, the Trash and the apps pinned in your macOS Dock
+- Can be turned off altogether, if the top bar is all you want
 
 **Top bar**
 

@@ -148,6 +148,7 @@ final class SettingsStore: ObservableObject {
     @Published var iconSize = 40.0 { didSet { edit(keepsTheme: true) { Settings.iconSize = iconSize } } }
 
     // Dock
+    @Published var showDock = true { didSet { edit(keepsTheme: true) { Settings.showDock = showDock } } }
     @Published var autoHide = true { didSet { edit(keepsTheme: true) { Settings.autoHide = autoHide } } }
     @Published var showPinned = false { didSet { edit(keepsTheme: true) { Settings.showPinned = showPinned } } }
     @Published var hiddenApps: [String] = [] { didSet { edit(keepsTheme: true) { Settings.hiddenApps = hiddenApps } } }
@@ -383,6 +384,7 @@ final class SettingsStore: ObservableObject {
         edgeGap = Appearance.edgeGap
         spacing = Appearance.spacing
         iconSize = Settings.iconSize
+        showDock = Settings.showDock
         autoHide = Settings.autoHide
         showPinned = Settings.showPinned
         hiddenApps = Settings.hiddenApps
@@ -681,6 +683,12 @@ private struct DockTab: View {
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Show the dock", isOn: $store.showDock)
+                if !store.showDock {
+                    Note("Turn it back on here, or from the Clear Dock icon in the menu bar.")
+                }
+            }
             Section("Where it sits") {
                 Picker("Position", selection: $store.position) {
                     ForEach(DockEdge.allCases) { Text($0.title).tag($0) }

@@ -243,7 +243,7 @@ final class DockController {
 
     /// While the dock should stay on screen, makes sure it is, putting it back if macOS took it off.
     private func keepOnScreen(because reason: String) {
-        guard !autoHides, !sliding else { return }
+        guard Settings.showDock, !autoHides, !sliding else { return }
         // Up, opaque and at its edge (its length can differ for a moment while an app opens or quits).
         let target = currentScreen.map { frame(on: $0, visible: true) }
         let atEdge = target.map { target in
@@ -316,13 +316,20 @@ final class DockController {
     /// Clear Dock sits beside a visible Apple Dock instead of on top of it. Sliding in from
     /// the screen edge would mean passing through Apple's Dock, so it stays put in that case.
     private var autoHides: Bool {
-        guard !keepVisible, Settings.autoHide || fullScreenFront || lockedIn else { return false }
+        guard Settings.showDock, !keepVisible, Settings.autoHide || fullScreenFront || lockedIn else { return false }
         return NSScreen.screens.allSatisfy { appleDockInset(on: $0) == 0 }
     }
 
     private func applyMode() {
         trashTimer?.invalidate()
         trashTimer = nil
+        guard Settings.showDock else {
+            // Turned off: away, with nothing at the edge to bring it back and no room kept for it.
+            removeTriggers()
+            hide(animated: shown, because: "turned off")
+            updateReservedSpace()
+            return
+        }
         dockLog.notice("Dock: \(self.autoHides ? "hides itself" : "stays on screen", privacy: .public) (hiding: \(Settings.autoHide), full screen: \(self.fullScreenFront), lock-in: \(self.lockedIn), settings open: \(self.keepVisible))")
         if autoHides {
             // If hiding was just turned on from the dock itself, slide away once the pointer leaves.
@@ -436,7 +443,7 @@ final class DockController {
     // MARK: Showing and hiding
 
     private func show(on screen: NSScreen?, animated: Bool, because reason: String = "pointer at the edge") {
-        guard let screen else { return }
+        guard Settings.showDock, let screen else { return }
         if !shown { dockLog.notice("Dock: showing (\(reason, privacy: .public))") }
         cancelHide()
         let movedScreen = self.screen?.displayID != screen.displayID

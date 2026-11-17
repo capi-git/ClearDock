@@ -18,6 +18,13 @@ enum Settings {
         set { defaults.set(newValue.rawValue, forKey: "position") }
     }
 
+    /// Whether Clear Dock shows its dock at all. Off, there's no dock and nothing waiting at the
+    /// screen edge for it, for a Mac that gets by with the top bar alone.
+    static var showDock: Bool {
+        get { defaults.bool(forKey: "showDock") }
+        set { defaults.set(newValue, forKey: "showDock") }
+    }
+
     static var autoHide: Bool {
         get { defaults.bool(forKey: "autoHide") }
         set { defaults.set(newValue, forKey: "autoHide") }
@@ -91,6 +98,7 @@ enum Settings {
         func seed(_ key: String, _ value: @autoclosure () -> Any) {
             if stored[key] == nil { defaults.set(value(), forKey: key) }
         }
+        seed("showDock", true)
         seed("autoHide", SystemDock.original("autohide")?.boolValue ?? false)
         // "static-only" is the macOS Dock setting that shows only open apps.
         seed("showPinned", !(SystemDock.bool("static-only") ?? false))

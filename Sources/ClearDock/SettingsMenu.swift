@@ -12,6 +12,11 @@ enum SettingsMenu {
             Settings.announceChangeElsewhere()
         }
 
+        menu.addItem(ActionMenuItem(Settings.showDock ? "Turn Dock Off" : "Turn Dock On") {
+            Settings.showDock.toggle()
+            changed()
+        })
+
         menu.addItem(ActionMenuItem(Settings.autoHide ? "Turn Hiding Off" : "Turn Hiding On") {
             Settings.autoHide.toggle()
             changed()
