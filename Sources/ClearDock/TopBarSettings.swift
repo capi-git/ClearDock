@@ -285,10 +285,26 @@ enum BarSettings {
     /// in a column on the left and a big one beside them). From before, three windows on or off.
     static var lockInLayout: Int {
         get {
-            if let saved = defaults.object(forKey: "lockIn.layout") as? Int { return min(3, max(1, saved)) }
+            if let saved = defaults.object(forKey: "lockIn.layout") as? Int { return min(4, max(1, saved)) }
             return defaults.bool(forKey: "lockIn.three") ? 3 : 2
         }
-        set { defaults.set(min(3, max(1, newValue)), forKey: "lockIn.layout") }
+        set { defaults.set(min(4, max(1, newValue)), forKey: "lockIn.layout") }
+    }
+
+    /// How many windows a lock-in layout takes: 1 one app, 2 two side by side, 3 three with two
+    /// stacked, 4 three side by side.
+    static func lockInWindows(_ layout: Int) -> Int { layout == 4 ? 3 : layout }
+
+    /// Three side by side: how much of the width the left and the right ones get (the middle one
+    /// has the rest).
+    static var lockInColumnsLeft: Double {
+        get { defaults.object(forKey: "lockIn.columnsLeft") == nil ? 0.25 : min(0.45, max(0.1, defaults.double(forKey: "lockIn.columnsLeft"))) }
+        set { defaults.set(newValue, forKey: "lockIn.columnsLeft") }
+    }
+
+    static var lockInColumnsRight: Double {
+        get { defaults.object(forKey: "lockIn.columnsRight") == nil ? 0.25 : min(0.45, max(0.1, defaults.double(forKey: "lockIn.columnsRight"))) }
+        set { defaults.set(newValue, forKey: "lockIn.columnsRight") }
     }
 
     /// A still, softened picture of the wallpaper behind the locked-in windows, over the wallpaper

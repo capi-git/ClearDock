@@ -4,8 +4,8 @@ import os
 import Accelerate
 import ScreenCaptureKit
 
-/// Lock-in mode: the desktop you're on, given over to two windows side by side (or, with three
-/// turned on, two stacked in a column on the left and a big one beside them), with the wallpaper
+/// Lock-in mode: the desktop you're on, given over to two windows side by side (or three: two
+/// stacked in a column on the left and a big one beside them, or all three side by side), with the wallpaper
 /// showing around them and a glowing edge round each. With just that many apps on the desktop it's
 /// those, straight away; with more, you choose which, and the rest are tucked away (minimized)
 /// until you unlock. It never takes you to another desktop, and each desktop can be locked in on
@@ -165,7 +165,7 @@ final class LockIn {
         guard !windows.isEmpty else {
             return Self.explain("Lock-in needs a window on this desktop", "Open the apps you want here, then click Lock In.")
         }
-        let layout = BarSettings.lockInLayout
+        let layout = BarSettings.lockInWindows(BarSettings.lockInLayout)
         // Apps left alone (usually just playing music alongside) only count when they're needed to
         // fill the layout.
         var pool = windows.filter { !$0.leftAlone }
@@ -194,12 +194,14 @@ final class LockIn {
         }
     }
 
-    /// Windows in their places, going by where they are now: two side by side stay on the side
-    /// they're on; of three, the biggest goes on the right and the other two stack in the order
-    /// they're in now.
+    /// Windows in their places, going by where they are now: side by side (two, or three with that
+    /// layout), they stay in the order they're in from left to right; of three stacked, the biggest
+    /// goes on the right and the other two stack in the order they're in now.
     static func arranged(_ windows: [Choice]) -> [Choice] {
         switch windows.count {
         case 2:
+            return windows.sorted { $0.frame.midX < $1.frame.midX }
+        case 3 where BarSettings.lockInLayout == 4:
             return windows.sorted { $0.frame.midX < $1.frame.midX }
         case 3:
             guard let big = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else { return windows }
@@ -223,7 +225,8 @@ final class LockIn {
               let display = screen.displayID, sessions[space] == nil else { return }
         restoreWaiting(on: space)
         let session = LockInSession(space: space, display: display,
-                                    panes: picked.map { LockInSession.Pane(pid: $0.pid, element: $0.element, id: $0.id) })
+                                    panes: picked.map { LockInSession.Pane(pid: $0.pid, element: $0.element, id: $0.id) },
+                                    sideBySide: picked.count == 3 && BarSettings.lockInLayout == 4)
         session.checkingApp = app
         session.accent = { [weak self, weak session] in
             guard let self, let session, let screen = session.screen else { return .systemPurple }
@@ -643,7 +646,8 @@ final class LockIn {
 let lockInLog = Logger(subsystem: "local.cleardock", category: "lockin")
 
 /// One locked-in desktop: its two windows kept side by side (or three: two stacked in a column on
-/// the left, a big one beside them), and the windows tucked away meanwhile.
+/// the left and a big one beside them, or all three side by side with a wide one in the middle),
+/// and the windows tucked away meanwhile.
 @MainActor
 private final class LockInSession {
     struct Pane {
@@ -677,18 +681,23 @@ private final class LockInSession {
     /// then the big one.
     private var panes: [Pane]
     /// Three, two of them stacked.
-    private var stacked: Bool { panes.count == 3 }
+    private var stacked: Bool { panes.count == 3 && !threeSideBySide }
+    /// Three side by side: left, middle (the wide one), right.
+    private let threeSideBySide: Bool
     private var movers: [WindowMover]
     private var ended = false
     /// While you drag the edge between them, and until both apps have caught up afterwards.
     private var dragging = false
     /// Which edge is being dragged: the one between the left and right (or the stack and the big
-    /// one), or the one between the two stacked windows.
-    private enum Edge { case upright, across }
+    /// one, or with three side by side the left and the middle), the one between the two stacked
+    /// windows, or with three side by side the one between the middle and the right.
+    private enum Edge { case upright, across, second }
     private var draggedEdge = Edge.upright
     /// The left window's (or the stack's) width, and the top stacked one's height, while dragging.
     private var draggedWidth: CGFloat?
     private var draggedHeight: CGFloat?
+    /// With three side by side, the right one's width while its edge is dragged.
+    private var draggedRight: CGFloat?
     /// Where on the edge you took hold of it: from its left side, or from its top for the edge
     /// between the stacked two.
     private var grabOffset: CGFloat = 0
@@ -698,6 +707,8 @@ private final class LockInSession {
     private let divider = DividerPanel(across: false)
     /// Between the two stacked ones.
     private let rowDivider = DividerPanel(across: true)
+    /// With three side by side, between the middle one and the right one.
+    private let secondDivider = DividerPanel(across: false)
     private let glows: [GlowFrame]
     /// What you see while you drag the edge between them.
     private var overlay: DragOverlay?
@@ -728,6 +739,9 @@ private final class LockInSession {
     private var splitShare: Double
     private var columnShare: Double
     private var rowShare: Double
+    /// With three side by side, the left and the right ones' shares of the width.
+    private var leftShare: Double
+    private var rightShare: Double
     /// Windows of other apps on the desktop not dealt with yet, since when, and how many times it's
     /// been tried, so one that never can be (a dialog, say, or one of an app that won't list its
     /// windows) is left alone after a while, rather than looked for over and over.
@@ -737,10 +751,13 @@ private final class LockInSession {
     nonisolated private static let windowNotifications = [kAXWindowMovedNotification, kAXWindowResizedNotification, kAXUIElementDestroyedNotification,
                                               kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
 
-    init(space: UInt64, display: CGDirectDisplayID, panes: [Pane]) {
+    init(space: UInt64, display: CGDirectDisplayID, panes: [Pane], sideBySide: Bool) {
         self.space = space
         self.display = display
         self.panes = panes
+        threeSideBySide = sideBySide && panes.count == 3
+        leftShare = BarSettings.lockInColumnsLeft
+        rightShare = BarSettings.lockInColumnsRight
         splitShare = BarSettings.lockInSplit
         columnShare = BarSettings.lockInStackColumn
         rowShare = BarSettings.lockInStackRows
@@ -752,6 +769,9 @@ private final class LockInSession {
         rowDivider.onBegin = { [weak self] offset in self?.grabbed(.across, at: offset) }
         rowDivider.onDrag = { [weak self] _ in self?.dividerMoved = true }
         rowDivider.onEnd = { [weak self] in self?.dividerReleased() }
+        secondDivider.onBegin = { [weak self] offset in self?.grabbed(.second, at: offset) }
+        secondDivider.onDrag = { [weak self] _ in self?.dividerMoved = true }
+        secondDivider.onEnd = { [weak self] in self?.dividerReleased() }
     }
 
     var screen: NSScreen? { NSScreen.screens.first { $0.displayID == display } }
@@ -816,7 +836,7 @@ private final class LockInSession {
         scheduleSettle()
         // Bring one forward (the left one, or the big one), unless you're already using one of them.
         if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, !involves(front), checkingApp == nil {
-            let main = panes[stacked ? 2 : 0]
+            let main = panes[stacked ? 2 : threeSideBySide ? 1 : 0]
             WindowFocus.raise(main.id, of: main.pid)
         }
     }
@@ -931,6 +951,11 @@ private final class LockInSession {
             return Self.stack(in: area, gap: gap, column: ((area.width - gap) * CGFloat(columnShare)).rounded(),
                               top: ((area.height - gap) * CGFloat(rowShare)).rounded())
         }
+        if threeSideBySide {
+            let width = area.width - gap * 2
+            return Self.sideBySide(in: area, gap: gap, left: (width * CGFloat(leftShare)).rounded(),
+                                   right: (width * CGFloat(rightShare)).rounded())
+        }
         if panes.count == 1 { return [area] }
         let left = ((area.width - gap) * CGFloat(splitShare)).rounded()
         return [
@@ -945,6 +970,14 @@ private final class LockInSession {
         [CGRect(x: area.minX, y: area.minY, width: column, height: top),
          CGRect(x: area.minX, y: area.minY + top + gap, width: column, height: area.height - top - gap),
          CGRect(x: area.minX + column + gap, y: area.minY, width: area.width - column - gap, height: area.height)]
+    }
+
+    /// Three side by side in `area`: one `left` wide on the left, one `right` wide on the right and
+    /// the middle one between them (system window coordinates).
+    private static func sideBySide(in area: CGRect, gap: CGFloat, left: CGFloat, right: CGFloat) -> [CGRect] {
+        [CGRect(x: area.minX, y: area.minY, width: left, height: area.height),
+         CGRect(x: area.minX + left + gap, y: area.minY, width: area.width - left - right - gap * 2, height: area.height),
+         CGRect(x: area.maxX - right, y: area.minY, width: right, height: area.height)]
     }
 
     private func fit() {
@@ -1037,6 +1070,10 @@ private final class LockInSession {
             settleStack(frames, in: area)
             return fit(found)
         }
+        if threeSideBySide {
+            settleSideBySide(frames, in: area)
+            return fit(found)
+        }
         // Just one: it has the whole space, and goes back to it if moved.
         guard panes.count == 2 else { return fit(found) }
         let goals = targets
@@ -1078,6 +1115,46 @@ private final class LockInSession {
     private func setRows(_ share: CGFloat) {
         rowShare = Double(min(0.9, max(0.1, share)))
         BarSettings.lockInStackRows = rowShare
+    }
+
+    private func setLeft(_ share: CGFloat) {
+        leftShare = Double(min(0.45, max(0.1, share)))
+        BarSettings.lockInColumnsLeft = leftShare
+    }
+
+    private func setRight(_ share: CGFloat) {
+        rightShare = Double(min(0.45, max(0.1, share)))
+        BarSettings.lockInColumnsRight = rightShare
+    }
+
+    /// The same for three side by side: an inner edge dragged (either side of the middle one, the
+    /// left one's right side or the right one's left side) sets how wide the outer ones are, and
+    /// one dragged onto another's place swaps the two.
+    private func settleSideBySide(_ frames: [CGRect], in area: CGRect) {
+        let goals = targets
+        guard frames.count == 3, goals.count == 3 else { return }
+        let gap = CGFloat(BarSettings.lockInGap)
+        let width = area.width - gap * 2
+        let left = frames[0], middle = frames[1], right = frames[2]
+        func kept(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 3 }
+        func moved(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) > 16 }
+        if kept(left.minX, goals[0].minX), moved(left.maxX, goals[0].maxX) {
+            setLeft((left.maxX - area.minX) / width)
+        } else if kept(right.maxX, goals[2].maxX), moved(right.minX, goals[2].minX) {
+            setRight((area.maxX - right.minX) / width)
+        } else if kept(middle.maxX, goals[1].maxX), moved(middle.minX, goals[1].minX) {
+            setLeft((middle.minX - gap - area.minX) / width)
+        } else if kept(middle.minX, goals[1].minX), moved(middle.maxX, goals[1].maxX) {
+            setRight((area.maxX - middle.maxX - gap) / width)
+        } else {
+            for index in frames.indices {
+                let centre = CGPoint(x: frames[index].midX, y: frames[index].midY)
+                guard !goals[index].contains(centre),
+                      let other = goals.indices.first(where: { $0 != index && goals[$0].contains(centre) }) else { continue }
+                swap(index, other)
+                break
+            }
+        }
     }
 
     private func swap(_ a: Int, _ b: Int) {
@@ -1140,6 +1217,7 @@ private final class LockInSession {
         draggedEdge = edge
         draggedWidth = nil
         draggedHeight = nil
+        draggedRight = nil
         grabOffset = offset
         let stacked = self.stacked
         // At each refresh of the screen it looks where the pointer is right then, rather than
@@ -1169,9 +1247,33 @@ private final class LockInSession {
     private func framesWhileDragging() -> [CGRect]? {
         let mouse = NSEvent.mouseLocation
         switch draggedEdge {
+        case .upright where threeSideBySide: return sideBySide(leftTo: mouse.x - grabOffset)
         case .upright: return stacked ? stack(columnTo: mouse.x - grabOffset) : split(at: mouse.x - grabOffset)
         case .across: return stack(rowsTo: mouse.y + grabOffset)
+        case .second: return sideBySide(rightTo: mouse.x - grabOffset)
         }
+    }
+
+    /// Where the three side by side go with the edge after the left one at `x`, or the edge
+    /// after the middle one at `x` (each by the edge's left side), keeping the middle one wide
+    /// enough to be of use.
+    private func sideBySide(leftTo x: CGFloat? = nil, rightTo x2: CGFloat? = nil) -> [CGRect]? {
+        guard !ended, threeSideBySide, let area else { return nil }
+        let gap = CGFloat(BarSettings.lockInGap)
+        let width = area.width - gap * 2
+        let narrowest = max(120, width * 0.1), middleNarrowest = max(240, width * 0.2)
+        var left = draggedWidth ?? (width * CGFloat(leftShare)).rounded()
+        var right = draggedRight ?? (width * CGFloat(rightShare)).rounded()
+        if let x {
+            left = min(max((x + DividerPanel.overlap - area.minX).rounded(), narrowest), max(narrowest, width - right - middleNarrowest))
+            draggedWidth = left
+        }
+        if let x2 {
+            let middleEnd = (x2 + DividerPanel.overlap).rounded()
+            right = min(max(area.maxX - middleEnd - gap, narrowest), max(narrowest, width - left - middleNarrowest))
+            draggedRight = right
+        }
+        return Self.sideBySide(in: area, gap: gap, left: left, right: right)
     }
 
     /// Where the three go with the edge beside the stack's left side at `x`, or the edge between
@@ -1202,10 +1304,14 @@ private final class LockInSession {
             guard frames.count == 3 else { return nil }
             return NSRect(x: (frames[0].maxX + frames[2].minX) / 2 - 2, y: frames[2].midY - 22, width: 4, height: 44)
         case .upright:
-            guard frames.count == 2 else { return nil }
+            // Two, or the first two of three side by side.
+            guard frames.count >= 2 else { return nil }
             let left = frames[0], right = frames[1]
             let midY = (max(left.minY, right.minY) + min(left.maxY, right.maxY)) / 2
             return NSRect(x: (left.maxX + right.minX) / 2 - 2, y: midY - 22, width: 4, height: 44)
+        case .second:
+            guard frames.count == 3 else { return nil }
+            return NSRect(x: (frames[1].maxX + frames[2].minX) / 2 - 2, y: frames[1].midY - 22, width: 4, height: 44)
         case .across:
             // Bottom-up, so the top one is the higher.
             guard frames.count == 3 else { return nil }
@@ -1248,11 +1354,15 @@ private final class LockInSession {
         if stacked {
             if let width = draggedWidth { setColumn(width / (area.width - gap)) }
             if let height = draggedHeight { setRows(height / (area.height - gap)) }
+        } else if threeSideBySide {
+            if let width = draggedWidth { setLeft(width / (area.width - gap * 2)) }
+            if let width = draggedRight { setRight(width / (area.width - gap * 2)) }
         } else if let width = draggedWidth {
             setSplit(Self.clampSplit(width / (area.width - gap)))
         }
         draggedWidth = nil
         draggedHeight = nil
+        draggedRight = nil
         // Now the apps resize, once each, out of sight under the covers.
         overlay?.move(goals.map(Self.flipped))
         drawnFrames = goals
@@ -1647,6 +1757,7 @@ private final class LockInSession {
         // With just one window there's no edge between.
         guard panes.count > 1 else {
             divider.orderOut(nil)
+            secondDivider.orderOut(nil)
             return rowDivider.orderOut(nil)
         }
         // The edges, a little over each window, so they're easy to take hold of. Beside a window
@@ -1656,6 +1767,19 @@ private final class LockInSession {
         let edges = places.count == frames.count
             ? zip(panes, zip(frames, places)).map { pane, both in largestSizes[pane.id] == nil ? both.0 : both.1 }
             : frames
+        if threeSideBySide {
+            rowDivider.orderOut(nil)
+            for (panel, (left, right)) in [(divider, (edges[0], edges[1])), (secondDivider, (edges[1], edges[2]))] {
+                let top = max(left.minY, right.minY), bottom = min(left.maxY, right.maxY)
+                if right.minX >= left.maxX - 1, bottom - top > 60 {
+                    panel.show(at: flipped(CGRect(x: left.maxX - overlap, y: top, width: right.minX - left.maxX + overlap * 2, height: bottom - top)))
+                } else {
+                    panel.orderOut(nil)
+                }
+            }
+            return
+        }
+        secondDivider.orderOut(nil)
         // Upright: between the left and the right, or between the stack and the big one.
         let left = stacked ? edges[0].union(edges[1]) : edges[0], right = edges[stacked ? 2 : 1]
         let top = max(left.minY, right.minY), bottom = min(left.maxY, right.maxY)
@@ -1688,6 +1812,7 @@ private final class LockInSession {
         drawnFrames = nil
         divider.orderOut(nil)
         rowDivider.orderOut(nil)
+        secondDivider.orderOut(nil)
         glows.forEach { $0.hide() }
     }
 

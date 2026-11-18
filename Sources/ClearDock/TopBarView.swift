@@ -294,6 +294,7 @@ private struct LockInPill: View {
                 Text("One App").tag(1)
                 Text("Two Side by Side").tag(2)
                 Text("Three, Two Stacked").tag(3)
+                Text("Three Side by Side").tag(4)
             }
             Divider()
             Button("Hide Lock In") { model.hide(.lockIn) }

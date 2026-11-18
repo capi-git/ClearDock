@@ -727,7 +727,7 @@ final class LockInPictures: ObservableObject {
 
 /// The lock-in chooser. The screen as it will look, with the windows in their places over the calm
 /// backdrop, is the heart of it; above, the layout (one app, two side by side, three with two
-/// stacked); below, the desktop's other windows. It starts with a guess at which window goes where.
+/// stacked, or three side by side); below, the desktop's other windows. It starts with a guess at which window goes where.
 /// Click a window below to put it in the highlighted place, or drag one place onto another to swap.
 private struct LockInPickerView: View {
     let choices: [LockIn.Choice]
@@ -754,8 +754,9 @@ private struct LockInPickerView: View {
         self.screenSize = screen.frame.size
         self.display = screen.displayID
         self.done = done
-        let layout = min(BarSettings.lockInLayout, max(1, choices.count))
-        let guess = Self.guess(layout, from: choices)
+        var layout = BarSettings.lockInLayout
+        if BarSettings.lockInWindows(layout) > max(1, choices.count) { layout = max(1, choices.count) }
+        let guess = Self.guess(BarSettings.lockInWindows(layout), from: choices)
         _layout = State(initialValue: layout)
         _slots = State(initialValue: guess)
         _selected = State(initialValue: Self.firstToFill(guess, layout: layout))
@@ -770,18 +771,23 @@ private struct LockInPickerView: View {
 
     /// The place a window chosen below goes: the first empty one, or else the main one.
     private static func firstToFill(_ slots: [CGWindowID?], layout: Int) -> Int {
-        slots.firstIndex { $0 == nil } ?? (layout == 3 ? 2 : 0)
+        slots.firstIndex { $0 == nil } ?? (layout == 3 ? 2 : layout == 4 ? 1 : 0)
     }
 
     /// The places in a unit square (measured from the top left), shared as lock-in will share the screen.
-    static func places(_ count: Int, gap: CGFloat) -> [CGRect] {
-        switch count {
+    static func places(_ layout: Int, gap: CGFloat) -> [CGRect] {
+        switch layout {
         case 1:
             return [CGRect(x: 0, y: 0, width: 1, height: 1)]
         case 2:
             let split = CGFloat(BarSettings.lockInSplit)
             return [CGRect(x: 0, y: 0, width: split - gap / 2, height: 1),
                     CGRect(x: split + gap / 2, y: 0, width: 1 - split - gap / 2, height: 1)]
+        case 4:
+            let left = CGFloat(BarSettings.lockInColumnsLeft), right = CGFloat(BarSettings.lockInColumnsRight)
+            return [CGRect(x: 0, y: 0, width: left - gap / 2, height: 1),
+                    CGRect(x: left + gap / 2, y: 0, width: 1 - left - right - gap, height: 1),
+                    CGRect(x: 1 - right + gap / 2, y: 0, width: right - gap / 2, height: 1)]
         default:
             let column = CGFloat(BarSettings.lockInStackColumn), rows = CGFloat(BarSettings.lockInStackRows)
             return [CGRect(x: 0, y: 0, width: column - gap / 2, height: rows - gap),
@@ -790,7 +796,7 @@ private struct LockInPickerView: View {
         }
     }
 
-    private var complete: Bool { slots.count == layout && !slots.contains(nil) }
+    private var complete: Bool { slots.count == BarSettings.lockInWindows(layout) && !slots.contains(nil) }
     private var others: [LockIn.Choice] { choices.filter { !slots.contains($0.id) } }
 
     var body: some View {
@@ -829,12 +835,13 @@ private struct LockInPickerView: View {
             }
             Spacer(minLength: 8)
             HStack(spacing: 2) {
-                ForEach(1...3, id: \.self) { count in
-                    let possible = count <= choices.count
-                    LayoutChip(places: Self.places(count, gap: 0.08), selected: layout == count, accent: accent)
+                ForEach(1...4, id: \.self) { option in
+                    let possible = BarSettings.lockInWindows(option) <= choices.count
+                    LayoutChip(places: Self.places(option, gap: 0.08), selected: layout == option, accent: accent)
                         .opacity(possible ? 1 : 0.3)
-                        .onTapGesture { if possible { choose(count) } }
-                        .help(count == 1 ? "One app" : count == 2 ? "Two side by side" : "Three: two stacked, one beside them")
+                        .onTapGesture { if possible { choose(option) } }
+                        .help(["One app", "Two side by side", "Three: two stacked, one beside them",
+                               "Three side by side, the middle one wide"][option - 1])
                 }
             }
             .padding(3)
@@ -956,12 +963,12 @@ private struct LockInPickerView: View {
 
     // MARK: Choosing
 
-    private func choose(_ count: Int) {
-        guard count != layout else { return }
-        layout = count
-        BarSettings.lockInLayout = count
-        slots = Self.guess(count, from: choices)
-        selected = Self.firstToFill(slots, layout: count)
+    private func choose(_ option: Int) {
+        guard option != layout else { return }
+        layout = option
+        BarSettings.lockInLayout = option
+        slots = Self.guess(BarSettings.lockInWindows(option), from: choices)
+        selected = Self.firstToFill(slots, layout: option)
     }
 
     /// Puts a window in the highlighted place (its window, if any, goes back below), then

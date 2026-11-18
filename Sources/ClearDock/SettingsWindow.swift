@@ -1040,6 +1040,7 @@ private struct DesktopsTab: View {
                     Text("One app").tag(1)
                     Text("Two side by side").tag(2)
                     Text("Three, two stacked").tag(3)
+                    Text("Three side by side").tag(4)
                 }
                 Toggle("Calm backdrop behind the windows", isOn: $store.lockInCalmBackdrop)
                 Toggle("Tuck away the other windows", isOn: $store.lockInHideOthers)
