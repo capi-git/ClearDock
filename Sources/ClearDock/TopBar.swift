@@ -1035,11 +1035,15 @@ final class TopBarController {
     private func pointerAtTop(of id: CGDirectDisplayID) {
         // Already watching the pointer up here: it carries on following it.
         guard holdScreen != id || holdTimer == nil else { return }
-        guard BarSettings.takesMenuBarsPlace, revealTimer == nil, !coveredScreens.contains(id) else { return }
+        guard BarSettings.takesMenuBarsPlace, revealTimer == nil, !coveredScreens.contains(id) else {
+            barLog.debug("Bar: pointer at the top ignored (takes place: \(BarSettings.takesMenuBarsPlace), stepped aside: \(self.revealTimer != nil), covered: \(self.coveredScreens.contains(id)))")
+            return
+        }
         // Fairly fresh: a live wallpaper (like Wallspace's) moves, and an old picture of it would
         // show as a seam along the bar.
         if Date().timeIntervalSince(backdropsTaken) > 20, backdropTask == nil { refreshBackdrops(after: 0) }
         if holdScreen != id { heldSince = Date() }
+        if holdTimer == nil { barLog.notice("Bar: pointer at the top; backdrop ready: \(self.model.backdrops[String(id)] != nil)") }
         holdScreen = id
         leftTopSince = nil
         if model.backdropScreens != [String(id)] { model.backdropScreens = [String(id)] }
@@ -1091,6 +1095,17 @@ final class TopBarController {
     private func refreshBackdrops(after delay: TimeInterval) {
         guard running, BarSettings.takesMenuBarsPlace, CGPreflightScreenCaptureAccess() else { return }
         backdropTask?.cancel()
+        backdropTask = Task { @MainActor [weak self] in
+            defer { if !Task.isCancelled { self?.backdropTask = nil } }
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            await self.takeBackdrops()
+        }
+    }
+
+    /// The pictures for `refreshBackdrops`, of the bars as they're placed now: worked out after its
+    /// wait, as at start the bars aren't placed yet and there'd be nothing to take.
+    private func takeBackdrops() async {
         let bars = panels.compactMap { id, entry -> (key: String, id: CGDirectDisplayID, frame: NSRect, scale: CGFloat)? in
             guard !coveredScreens.contains(id), let screen = NSScreen.screens.first(where: { $0.displayID == id }) else { return nil }
             // The bar's place on its screen, measured from the screen's top-left corner.
@@ -1098,35 +1113,32 @@ final class TopBarController {
             let local = NSRect(x: frame.minX - screen.frame.minX, y: screen.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
             return (String(id), id, local, screen.backingScaleFactor)
         }
-        backdropTask = Task { @MainActor [weak self] in
-            defer { if !Task.isCancelled { self?.backdropTask = nil } }
-            try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled,
-                  let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
-            var images: [String: CGImage] = [:]
-            for bar in bars {
-                guard !Task.isCancelled else { return }
-                guard let display = content.displays.first(where: { $0.displayID == bar.id }) else { continue }
-                let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
-                let config = SCStreamConfiguration()
-                config.sourceRect = bar.frame
-                config.width = Int(bar.frame.width * bar.scale)
-                config.height = Int(bar.frame.height * bar.scale)
-                config.showsCursor = false
-                if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
-                    images[bar.key] = image
-                }
+        guard !bars.isEmpty, !Task.isCancelled,
+              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
+        var images: [String: CGImage] = [:]
+        for bar in bars {
+            guard !Task.isCancelled else { return }
+            guard let display = content.displays.first(where: { $0.displayID == bar.id }) else { continue }
+            let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
+            let config = SCStreamConfiguration()
+            config.sourceRect = bar.frame
+            config.width = Int(bar.frame.width * bar.scale)
+            config.height = Int(bar.frame.height * bar.scale)
+            config.showsCursor = false
+            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                images[bar.key] = image
             }
-            guard let self, !Task.isCancelled else { return }
-            self.model.backdrops = images
-            self.backdropsTaken = Date()
         }
+        guard !Task.isCancelled, !images.isEmpty else { return }
+        model.backdrops = images
+        backdropsTaken = Date()
     }
 
     /// The pointer was held at the top, so step out of the way of the macOS menu bar, and come back
     /// once the pointer leaves the menus.
     private func menuBarRevealing(on id: CGDirectDisplayID) {
         guard revealTimer == nil else { return }
+        barLog.notice("Bar: stepping aside for the macOS menu bar")
         revealStarted = Date()
         revealScreen = id
         setBarsVisible(false, only: id)
@@ -1173,11 +1185,35 @@ final class TopBarController {
     }
 
     private func menuBarGone() {
+        barLog.notice("Bar: back after the macOS menu bar")
         revealTimer?.invalidate()
         revealTimer = nil
         revealScreen = nil
         if !model.backdropScreens.isEmpty { model.backdropScreens = [] }
         setBarsVisible(true)
+        raiseBars()
+    }
+
+    /// Puts the bars back in front of the macOS menu bar. On newer macOS the menu bar is a window of
+    /// MenuBarAgent's at the bar's own level, and it comes in front each time it shows. Left there,
+    /// it takes the pointer at the top of the screen, so the bar never notices you reaching for the
+    /// menus: it neither fills in nor steps aside, and the menu bar slides down over it.
+    private func raiseBars() {
+        for (id, entry) in panels where entry.panel.isVisible && !leaving.contains(id) {
+            entry.panel.orderFrontRegardless()
+        }
+    }
+
+    /// Whether a macOS menu bar window is in front of one of Clear Dock's own at the bar's level, in
+    /// a list of the windows on screen (front to back).
+    nonisolated private static func menuBarInFront(of windows: [[String: Any]]) -> Bool {
+        let level = Int(CGWindowLevelForKey(.statusWindow))
+        let me = getpid()
+        for info in windows where info[kCGWindowLayer as String] as? Int == level {
+            if info[kCGWindowOwnerPID as String] as? pid_t == me { return false }
+            if info[kCGWindowOwnerName as String] as? String == "MenuBarAgent" { return true }
+        }
+        return false
     }
 
     /// Whether a macOS menu bar is down on any of `screens` (unless `countingMenuBar` is off: an app
@@ -1289,6 +1325,7 @@ final class TopBarController {
                     indicators[id] = max(indicators[id] ?? 0, (area.maxX - rect.minX + 2).rounded())
                 }
             }
+            let menuBarAbove = Self.menuBarInFront(of: windows)
             // macOS's own menu bar, up along the top of a screen.
             var held = Set<CGDirectDisplayID>()
             let menuLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
@@ -1323,6 +1360,10 @@ final class TopBarController {
                     guard let self, self.running else { return }
                     // Up because you're reaching for it (the pointer at the top) doesn't count.
                     let reaching = self.holdTimer != nil || self.revealTimer != nil
+                    if menuBarAbove && !reaching {
+                        barLog.notice("Bar: macOS menu bar was in front of the bar; putting the bar back in front")
+                        self.raiseBars()
+                    }
                     let heldChanged = !reaching && held != self.menuBarHeldUp
                     if heldChanged { self.menuBarHeldUp = held }
                     let indicatorsChanged = indicators != self.indicatorRoom
