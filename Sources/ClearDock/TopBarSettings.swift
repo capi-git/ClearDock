@@ -358,7 +358,7 @@ enum BarSettings {
         return lockInAllowedApps.contains(bundle)
     }
 
-    /// A glowing edge around both apps.
+    /// A glowing edge around each locked-in app.
     static var lockInBorder: Bool {
         get { defaults.object(forKey: "lockIn.border") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "lockIn.border") }

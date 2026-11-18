@@ -1044,7 +1044,7 @@ private struct DesktopsTab: View {
                 }
                 Toggle("Calm backdrop behind the windows", isOn: $store.lockInCalmBackdrop)
                 Toggle("Tuck away the other windows", isOn: $store.lockInHideOthers)
-                Toggle("Glowing edge around both apps", isOn: $store.lockInBorder)
+                Toggle("Glowing edge around the apps", isOn: $store.lockInBorder)
                 LabeledContent("Apps left alone") {
                     Menu("Add") {
                         ForEach(store.appsToAllow, id: \.bundle) { app in

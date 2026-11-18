@@ -296,6 +296,14 @@ private struct LockInPill: View {
                 Text("Three, Two Stacked").tag(3)
                 Text("Three Side by Side").tag(4)
             }
+            Toggle("Glowing Edge", isOn: Binding(get: { BarSettings.lockInBorder }, set: { on in
+                BarSettings.lockInBorder = on
+                NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+            }))
+            Toggle("Calm Backdrop", isOn: Binding(get: { BarSettings.lockInCalmBackdrop }, set: { on in
+                BarSettings.lockInCalmBackdrop = on
+                NotificationCenter.default.post(name: BarSettings.didChange, object: nil)
+            }))
             Divider()
             Button("Hide Lock In") { model.hide(.lockIn) }
             BarSettingsButton()
